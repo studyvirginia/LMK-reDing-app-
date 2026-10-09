@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Book Reader</title>
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<style>
+:root { --bg:#14161a; --panel:#1d2026; --ink:#e6e3da; --dim:#8b909a; --accent:#e7c35a; --hl:rgba(231,195,90,.22); --line:#2a2e36; --fs:19px; }
+* { box-sizing:border-box; }
+html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); }
+body { font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; display:flex; flex-direction:column; }
+button, select, input, textarea { font:inherit; color:inherit; }
+button { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 14px; cursor:pointer; }
+button:hover { border-color:var(--dim); }
+header { display:flex; align-items:center; gap:10px; padding:10px 14px; padding-top:max(10px,env(safe-area-inset-top)); border-bottom:1px solid var(--line); background:var(--panel); }
+header .title { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; }
+header .prog { color:var(--dim); font-size:13px; white-space:nowrap; }
+#bar { height:3px; background:var(--line); } #barfill { height:100%; width:0; background:var(--accent); transition:width .3s; }
+main { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; scroll-behavior:smooth; }
+#content { max-width:44rem; margin:0 auto; padding:24px 18px 40vh; font-family:Georgia,"Iowan Old Style",serif; font-size:var(--fs); line-height:1.7; overflow-wrap:break-word; }
+#content h1,#content h2,#content h3,#content h4 { font-family:ui-sans-serif,system-ui,sans-serif; line-height:1.3; margin:1.6em 0 .5em; }
+#content a { color:var(--accent); }
+#content code { background:var(--panel); padding:.1em .35em; border-radius:5px; font-size:.85em; }
+#content pre { background:var(--panel); padding:12px; border-radius:8px; overflow-x:auto; }
+#content pre code { background:none; padding:0; }
+body.wrap #content pre { white-space:pre-wrap; word-break:break-word; }
+#content blockquote { margin:1em 0; padding-left:1em; border-left:3px solid var(--line); color:var(--dim); }
+#content table { border-collapse:collapse; display:block; overflow-x:auto; } #content td,#content th { border:1px solid var(--line); padding:4px 10px; }
+#content li.d1 { margin-left:1.2em; } #content li.d2 { margin-left:2.4em; } #content li.d3 { margin-left:3.6em; }
+.s { cursor:pointer; border-radius:4px; transition:background .15s; -webkit-box-decoration-break:clone; box-decoration-break:clone; }
+.s.active { background:var(--hl); }
+.mathblock { padding:4px 0; margin:.4em 0; overflow-x:auto; overflow-y:hidden; }
+.katex { font-size:1.08em; }
+.empty { color:var(--dim); text-align:center; margin-top:15vh; padding:0 20px; line-height:1.6; }
+footer { display:flex; align-items:center; justify-content:center; gap:10px; padding:10px 14px; padding-bottom:max(10px,env(safe-area-inset-bottom)); border-top:1px solid var(--line); background:var(--panel); }
+footer button.play { width:64px; height:48px; font-size:22px; background:var(--accent); color:#1a1a1a; border:0; border-radius:24px; }
+footer .skip { width:44px; padding:8px 0; }
+footer select { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:8px; }
+#status { position:fixed; left:50%; transform:translateX(-50%); bottom:84px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px 14px; font-size:13px; color:var(--dim); display:none; max-width:90vw; text-align:center; z-index:5; }
+dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:16px; padding:0; width:min(32rem,94vw); max-height:88vh; }
+dialog::backdrop { background:rgba(0,0,0,.6); }
+.dlg { padding:18px; display:flex; flex-direction:column; gap:14px; overflow-y:auto; max-height:86vh; }
+.dlg h2 { margin:0; font-size:18px; display:flex; justify-content:space-between; align-items:center; }
+.row { display:flex; gap:10px; align-items:center; justify-content:space-between; } .row > label { color:var(--dim); font-size:14px; }
+.book { display:flex; align-items:center; gap:10px; padding:10px; border:1px solid var(--line); border-radius:10px; cursor:pointer; }
+.book.cur { border-color:var(--accent); } .book .nm { flex:1; min-width:0; } .book .nm b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.book .meter { height:4px; background:var(--line); border-radius:2px; margin-top:6px; } .book .meter i { display:block; height:100%; background:var(--accent); border-radius:2px; }
+.book small { color:var(--dim); } .book .x { padding:4px 10px; color:var(--dim); }
+textarea, input[type=text] { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px; }
+textarea { min-height:90px; resize:vertical; }
+input[type=range] { width:100%; }
+.hint { color:var(--dim); font-size:13px; line-height:1.5; }
+</style>
+</head>
+<body>
+<header>
+  <button id="btnLib" aria-label="Library">&#9776; Library</button>
+  <div class="title" id="title">Book Reader</div>
+  <div class="prog" id="prog"></div>
+  <button id="btnSet" aria-label="Settings">&#9881;</button>
+</header>
+<div id="bar"><div id="barfill"></div></div>
+<main id="main"><div id="content"></div></main>
+<div id="status"></div>
+<footer>
+  <button class="skip" id="btnPrev" aria-label="Previous sentence">&#9198;</button>
+  <button class="play" id="btnPlay" aria-label="Play or pause">&#9654;</button>
+  <button class="skip" id="btnNext" aria-label="Next sentence">&#9197;</button>
+  <select id="speed" aria-label="Speed"></select>
+</footer>
+
+<dialog id="dlgLib"><div class="dlg">
+  <h2>Library <button id="closeLib">Close</button></h2>
+  <div id="books"></div>
+  <div class="row"><label>Add files (.md .tex .txt)</label><button id="btnFiles">Choose…</button></div>
+  <input type="file" id="files" accept=".md,.markdown,.tex,.txt,text/*" multiple hidden>
+  <input type="text" id="pasteName" placeholder="Name for pasted text">
+  <textarea id="pasteText" placeholder="…or paste Markdown / LaTeX here"></textarea>
+  <button id="btnPaste">Add pasted text</button>
+  <div class="hint">Everything is stored only in this browser on this device. Nothing is uploaded.</div>
+</div></dialog>
+
+<dialog id="dlgSet"><div class="dlg">
+  <h2>Settings <button id="closeSet">Close</button></h2>
+  <div class="row"><label>Voice engine</label>
+    <select id="engine"><option value="kokoro">Natural (Kokoro, free)</option><option value="device">This device's voice</option></select></div>
+  <div class="row" id="rowKVoice"><label>Natural voice</label><select id="kvoice"></select></div>
+  <div class="row" id="rowDVoice"><label>Device voice</label><select id="dvoice"></select></div>
+  <div class="row"><label>Text size</label><input type="range" id="fs" min="14" max="30" step="1" style="width:55%"></div>
+  <div class="row"><label>Wrap long code lines</label><input type="checkbox" id="wrap"></div>
+  <div class="hint">Natural voice downloads a ~90&nbsp;MB model once (first time you press play), then works offline. Tap any sentence to jump there.</div>
+</div></dialog>
+
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/katex/katex.min.js"></script>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
