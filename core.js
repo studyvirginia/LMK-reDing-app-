@@ -236,7 +236,7 @@ function texToMd(src) {
   t = t.replace(/\\(maketitle|tableofcontents|newpage|clearpage|centering|noindent|bigskip|medskip|smallskip)\b/g, '');
   t = t.replace(/\\begin\{abstract\}/g, '\n\n**Abstract.** ').replace(/\\end\{abstract\}/g, '\n\n');
   const head = { chapter: '#', section: '##', subsection: '###', subsubsection: '####' };
-  t = t.replace(/\\(chapter|section|subsection|subsubsection)\*?\{([^{}]*)\}/g, (m, k, x) => '\n\n' + head[k] + ' ' + x + '\n\n');
+  t = t.replace(/\\(chapter|section|subsection|subsubsection)\*?(?:\[[^\]]*\])?\{((?:[^{}]|\{[^{}]*\})*)\}/g, (m, k, x) => '\n\n' + head[k] + ' ' + x.replace(/\s+/g, ' ') + '\n\n');
   t = t.replace(/\\(paragraph|subparagraph)\*?\{([^{}]*)\}/g, '\n\n**$2** ');
   t = t.replace(/\\begin\{(itemize|enumerate)\}([\s\S]*?)\\end\{\1\}/g, (m, kind, body) =>
     '\n\n' + body.replace(/\\item\s*(\[[^\]]*\])?/g, kind === 'itemize' ? '\n- ' : '\n1. ') + '\n\n');
@@ -369,6 +369,29 @@ function htmlToText(h) {
 }
 const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+
+/* ---------- table of contents ---------- */
+
+function plainTitle(md) {
+  return md.replace(/⟦\d+⟧/g, ' ').replace(/\$[^$]*\$/g, ' ').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`\\]/g, '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 140);
+}
+// headings of one chunk of source text (skips code blocks); n = which repeat of the same title this is
+function scanHeadings(text) {
+  const out = [], cnt = {}; let fence = null;
+  for (const line of text.split('\n')) {
+    const f = /^\s*(```|~~~)/.exec(line);
+    if (f) { fence = fence ? (f[1] === fence ? null : fence) : f[1]; continue; }
+    if (fence) continue;
+    const m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    if (!m) continue;
+    const title = plainTitle(m[2]); if (!title || !/[A-Za-z0-9]/.test(title)) continue;
+    cnt[title] = cnt[title] == null ? 0 : cnt[title] + 1;
+    out.push({ level: m[1].length, title, n: cnt[title] });
+  }
+  return out;
+}
+
 /* ---------- document builder ---------- */
 
 function buildDocument(raw, env) {
@@ -376,7 +399,7 @@ function buildDocument(raw, env) {
   const text0 = raw.replace(/\r\n?/g, '\n').replace(/\t/g, '    ');
   const { text, maths } = extractMath(text0);
   const blocks = parseBlocks(text, i => maths[i] && maths[i].display);
-  const units = [];
+  const units = [], headings = [];
   const TOK = /⟦(\d+)⟧/g;
   const speechCache = {};
   const mathSpeech = i => speechCache[i] != null ? speechCache[i] : (speechCache[i] = texToSpeech(maths[i].tex));
@@ -404,7 +427,7 @@ function buildDocument(raw, env) {
   const closeList = () => { if (openList) { html += '</' + openList + '>'; openList = null; } };
   for (const b of blocks) {
     if (b.t !== 'li') closeList();
-    if (b.t === 'h') html += '<h' + b.level + '>' + unit(b.md, true, '.') + '</h' + b.level + '>';
+    if (b.t === 'h') { const u0 = units.length; html += '<h' + b.level + '>' + unit(b.md, true, '.') + '</h' + b.level + '>'; headings.push({ level: b.level, title: plainTitle(b.md), unit: units.length > u0 ? u0 : -1 }); }
     else if (b.t === 'p') html += '<p>' + unit(b.md) + '</p>';
     else if (b.t === 'quote') html += '<blockquote>' + unit(b.md) + '</blockquote>';
     else if (b.t === 'li') {
@@ -417,7 +440,7 @@ function buildDocument(raw, env) {
     } else html += '<div class="rawblock">' + parseBlock(b.md) + '</div>';
   }
   closeList();
-  return { html, units, maths };
+  return { html, units, maths, headings };
 }
 
 
@@ -463,6 +486,6 @@ function chunkForTTS(t, max) {
   return fin;
 }
 
-const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, splitChunks, esc };
+const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, splitChunks, scanHeadings, plainTitle, esc };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.BookCore = api;
 })(typeof self !== 'undefined' ? self : this);

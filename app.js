@@ -63,6 +63,7 @@ let saveTimer = 0;
 let pxPerChar = 0.5;  // learned: how tall a chunk is per character, to size sections that aren't built yet
 let chunkObs = null;
 let openStamp = 0;
+let toc = [];         // table of contents: {level, title, c, n}
 
 /* ---------- building and showing chunks ---------- */
 function renderMath(tex, display) {
@@ -75,8 +76,25 @@ const looksTex = (b, text) => b.type === 'tex' || /\\documentclass|\\begin\{docu
 
 function ensureData(c) { // turn the raw text of a chunk into sentences + html (no DOM work)
   const ch = chunks[c];
-  if (!ch.units) { const d = Core.buildDocument(ch.text, env()); ch.units = d.units; ch.html = d.html; ch.maths = d.maths; }
+  if (!ch.units) { const d = Core.buildDocument(ch.text, env()); ch.units = d.units; ch.html = d.html; ch.maths = d.maths; ch.headings = d.headings; }
   return ch;
+}
+function buildToc() {
+  toc = [];
+  chunks.forEach((ch, c) => { Core.scanHeadings(ch.text).forEach(h => toc.push({ level: h.level, title: h.title, c, n: h.n })); });
+  if (toc.length < 2) { // no real headings: offer the parts of the book instead
+    toc = chunks.map((ch, c) => {
+      const first = (ch.text.split('\n').find(l => /[A-Za-z0-9]/.test(l)) || '').replace(/^#+\s*/, '');
+      return { level: 1, title: 'Part ' + (c + 1) + ' — ' + Core.plainTitle(first).slice(0, 60), c, n: 0, part: true };
+    });
+  }
+}
+// sentence index of a TOC entry (its heading), or the first sentence of its chunk
+function tocUnit(e) {
+  ensureData(e.c);
+  const hs = chunks[e.c].headings.filter(h => h.title === e.title && h.unit >= 0);
+  const h = hs[e.n] || hs[0];
+  return h ? h.unit : firstPos(e.c)[1];
 }
 function drawMath(ch, el) {
   if (el.dataset.done) return; el.dataset.done = '1';
@@ -143,6 +161,13 @@ function mark(scroll) {
   progress();
 }
 
+function jumpTo(c, i) {
+  if (playing) { start(c, i); } else { cc = c; ci = i; mark('jump'); savePos(); }
+  const stamp = ++openStamp;
+  // neighbouring sections finish building a moment later and can nudge the page; re-centre once they have settled
+  [150, 600].forEach(ms => setTimeout(() => { if (stamp === openStamp && cc === c && ci === i && !playing) mark('jump'); }, ms));
+}
+
 async function openBook(b) {
   stop();
   status('Opening…');
@@ -165,7 +190,7 @@ async function openBook(b) {
   cc = Math.max(0, Math.min(chunks.length - 1, p0.c | 0)); ci = Math.max(0, p0.u | 0);
   const n = ensureData(cc).units.length;
   if (ci >= n) { const p = firstPos(cc); cc = p[0]; ci = p[1]; }
-  if (!stepPos(0, -1, 1)) { content.innerHTML = '<div class="empty">This file has no readable text.</div>'; chunks = []; secs = []; status(null); return; }
+  if (!stepPos(0, -1, 1)) { content.innerHTML = '<div class="empty">This file has no readable text.</div>'; chunks = []; secs = []; toc = []; status(null); return; }
   cacheClear();
   mark('jump');
   status(null);
@@ -176,9 +201,9 @@ async function openBook(b) {
     }), { root: $('main'), rootMargin: '3000px 0px' });
     secs.forEach(s => chunkObs.observe(s));
   }
-  // neighbouring sections finish building a moment later and can nudge the page; re-centre once they have settled
   const stamp = ++openStamp, c0 = cc, i0 = ci;
   [150, 600].forEach(ms => setTimeout(() => { if (stamp === openStamp && cc === c0 && ci === i0 && !playing) mark('jump'); }, ms));
+  buildToc();
   savePos();
 }
 
@@ -395,7 +420,7 @@ function renderLibrary() {
       ev.stopPropagation();
       if (!confirm('Delete "' + b.name + '" from this device?')) return;
       await store.del(b.id);
-      if (book && book.id === b.id) { stop(); book = null; chunks = []; secs = []; $('content').innerHTML = welcome(); $('title').textContent = 'Book Reader'; $('prog').textContent = ''; $('barfill').style.width = '0'; }
+      if (book && book.id === b.id) { stop(); book = null; chunks = []; secs = []; toc = []; $('content').innerHTML = welcome(); $('title').textContent = 'Book Reader'; $('prog').textContent = ''; $('barfill').style.width = '0'; }
       refreshBooks();
     };
     row.append(nm, x);
@@ -407,16 +432,29 @@ async function addBook(name, text, type) {
   const b = { id: 'b' + Date.now() + Math.random().toString(36).slice(2, 6), name, type, pos: { c: 0, u: 0 }, pct: 0, updated: Date.now() };
   await store.putText(b.id, text); await store.put(b); return b;
 }
-const notText = (name, text) => /\.(pdf|epub|docx?|pptx?|rtf|png|jpe?g|gif|zip)$/i.test(name) || text.startsWith('%PDF') || text.slice(0, 4000).indexOf('\u0000') >= 0 || text.slice(0, 4000).indexOf('�') >= 0;
+const notText = (name, text) => /\.(epub|docx?|pptx?|rtf|png|jpe?g|gif|zip)$/i.test(name) || text.slice(0, 4000).indexOf('\u0000') >= 0 || text.slice(0, 4000).indexOf('\uFFFD') >= 0;
 $('btnFiles').onclick = () => $('files').click();
 $('files').onchange = async e => {
   let last = null;
   for (const f of e.target.files) {
-    status('Reading ' + f.name + '…');
-    const text = await f.text();
-    if (notText(f.name, text)) { status(null); alert('"' + f.name + '" is not a text file (PDF, Word and e-book files can’t be read directly).\n\nExport or convert it to Markdown (.md), LaTeX (.tex) or plain text (.txt) and add that instead.'); continue; }
-    status('Saving ' + f.name + '…');
-    last = await addBook(f.name.replace(/\.[^.]+$/, ''), text, /\.tex$/i.test(f.name) ? 'tex' : 'md');
+    try {
+      if (/\.pdf$/i.test(f.name) || f.type === 'application/pdf') {
+        status('Reading PDF ' + f.name + '…');
+        const r = await PdfImport.extract(f, (p, n) => status('Reading PDF ' + f.name + ': page ' + p + ' of ' + n + '…'));
+        status('Saving ' + f.name + '…');
+        last = await addBook(f.name.replace(/\.[^.]+$/, ''), r.markdown, 'md');
+        continue;
+      }
+      status('Reading ' + f.name + '…');
+      const text = await f.text();
+      if (notText(f.name, text)) { status(null); alert('"' + f.name + '" is not a text file (Word and e-book files can’t be read directly).\n\nExport or convert it to Markdown (.md), LaTeX (.tex), plain text (.txt) or PDF and add that instead.'); continue; }
+      status('Saving ' + f.name + '…');
+      last = await addBook(f.name.replace(/\.[^.]+$/, ''), text, /\.tex$/i.test(f.name) ? 'tex' : 'md');
+    } catch (err) {
+      console.error(err); status(null);
+      if (err && err.code === 'scanned') alert('"' + f.name + '" has no selectable text. It looks like scanned page images, which need OCR (text recognition) first.');
+      else alert('Could not read "' + f.name + '": ' + (err && err.message || err));
+    }
   }
   status(null); e.target.value = '';
   await refreshBooks();
@@ -432,6 +470,42 @@ $('btnLib').onclick = () => { renderLibrary(); $('dlgLib').showModal(); };
 $('closeLib').onclick = () => $('dlgLib').close();
 $('btnSet').onclick = () => $('dlgSet').showModal();
 $('closeSet').onclick = () => $('dlgSet').close();
+
+
+/* ---------- table of contents dialog ---------- */
+function currentTocIndex() {
+  let cur = -1;
+  for (let k = 0; k < toc.length; k++) {
+    const e = toc[k];
+    if (e.c < cc) cur = k;
+    else if (e.c === cc) { if (tocUnit(e) <= ci) cur = k; }
+    else break;
+  }
+  return cur;
+}
+function renderToc() {
+  const list = $('tocList'), q = $('tocFilter').value.trim().toLowerCase();
+  list.textContent = '';
+  if (!toc.length) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = book ? 'No headings found in this book.' : 'Open a book first.'; list.appendChild(d); return; }
+  const minLevel = Math.min.apply(null, toc.map(e => e.level));
+  const cur = currentTocIndex();
+  let shown = 0, curBtn = null;
+  for (let k = 0; k < toc.length; k++) {
+    const e = toc[k];
+    if (q && e.title.toLowerCase().indexOf(q) < 0) continue;
+    if (!q && shown >= 800 && k !== cur) continue; // very long contents: show the first 800, search for the rest
+    const b = document.createElement('button'); b.className = 'toc' + (k === cur ? ' cur' : '');
+    b.style.paddingLeft = (6 + (e.level - minLevel) * 16) + 'px';
+    b.textContent = e.title;
+    b.onclick = () => { $('dlgToc').close(); jumpTo(e.c, tocUnit(e)); };
+    list.appendChild(b); shown++; if (k === cur) curBtn = b;
+  }
+  if (!q && toc.length > 800) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = 'Showing the first 800 of ' + toc.length + ' headings. Type above to search all of them.'; list.appendChild(d); }
+  if (curBtn) curBtn.scrollIntoView({ block: 'center' });
+}
+$('btnToc').onclick = () => { $('tocFilter').value = ''; renderToc(); $('dlgToc').showModal(); };
+$('closeToc').onclick = () => $('dlgToc').close();
+$('tocFilter').oninput = renderToc;
 
 /* ---------- settings UI ---------- */
 function syncSettingsUI() {
@@ -492,6 +566,6 @@ window.__reader = {
   get pos() { return { c: cc, u: ci }; }, get nchunks() { return chunks.length; },
   get attached() { return chunks.filter(c => c.attached).length; },
   get cur() { return chunks[cc] && chunks[cc].units && chunks[cc].units[ci] && chunks[cc].units[ci].speak; },
-  get books() { return books; }, start, stop, skip, openBook
+  get books() { return books; }, get toc() { return toc; }, start, stop, skip, openBook
 };
 })();

@@ -49,4 +49,12 @@ const chs = C.splitChunks(big, 3000, 9000);
 eq('chunks rejoin', chs.join('\n'), big);
 eq('chunks > 1', chs.length > 10, true);
 eq('no chunk breaks a fence/display', chs.every(c => ((c.match(/```/g) || []).length % 2 === 0) && ((c.match(/\$\$/g) || []).length % 2 === 0)), true);
+
+// table of contents
+const SH = C.scanHeadings('# One\n\ntext\n\n```bash\n# not a heading\n```\n\n## Two $x^2$\n\n## Two $x^2$\n\n### **Bold** [link](http://x)\n');
+eq('toc scan', SH.map(h => [h.level, h.title, h.n]), [[1, 'One', 0], [2, 'Two', 0], [2, 'Two', 1], [3, 'Bold link', 0]]);
+const TD = C.buildDocument('# One\n\ntext here.\n\n## Two\n\nmore. text.\n', { renderMath: () => '', parseInline: s => s, parseBlock: s => s });
+eq('toc heading units', TD.headings.map(h => [h.title, h.unit]), [['One', 0], ['Two', 2]]);
+const TM = C.texToMd('\\chapter{Intro}\n\\section{On $f_{x}$ and {braces}}\n\\section*{Star}\n');
+eq('tex headings nested braces', TM.trim().split(/\n+/), ['# Intro', '## On $f_{x}$ and {braces}', '## Star']);
 console.log(fail ? fail + ' FAILED' : 'ALL PASS'); process.exit(fail ? 1 : 0);
