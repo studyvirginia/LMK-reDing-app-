@@ -376,7 +376,8 @@ function buildDocument(raw, env) {
   const TOK = /⟦(\d+)⟧/g;
   const speechCache = {};
   const mathSpeech = i => speechCache[i] != null ? speechCache[i] : (speechCache[i] = texToSpeech(maths[i].tex));
-  const mathHtml = i => renderMath(maths[i].tex, maths[i].display);
+  // lazyMath: leave a placeholder and let the page draw it when scrolled near (huge books create millions of nodes otherwise)
+  const mathHtml = i => env.lazyMath ? '<span class="mj" data-m="' + i + '"></span>' : renderMath(maths[i].tex, maths[i].display);
 
   function inline(md) {
     const h = parseInline(md);
@@ -412,7 +413,7 @@ function buildDocument(raw, env) {
     } else html += '<div class="rawblock">' + parseBlock(b.md) + '</div>';
   }
   closeList();
-  return { html, units };
+  return { html, units, maths };
 }
 
 /* ---------- TTS chunking ---------- */

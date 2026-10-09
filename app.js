@@ -60,11 +60,32 @@ function renderMath(tex, display) {
 }
 marked.setOptions({ gfm: true, breaks: false });
 const env = () => ({
+  lazyMath: true,
   renderMath,
   parseInline: s => marked.parseInline(s),
   parseBlock: s => marked.parse(s)
 });
 const isTex = b => b.type === 'tex' || /\\documentclass|\\begin\{document\}/.test(b.text);
+
+
+/* lazy math: draw an equation only when it scrolls near the screen */
+let mathList = [], mathObs = null;
+function drawMath(el) {
+  if (el.dataset.done) return; el.dataset.done = '1';
+  const m = mathList[+el.dataset.m]; if (m) el.innerHTML = renderMath(m.tex, m.display);
+  if (mathObs) mathObs.unobserve(el);
+}
+function setupMath(maths) {
+  if (mathObs) mathObs.disconnect();
+  mathList = maths;
+  if ('IntersectionObserver' in window) {
+    mathObs = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) drawMath(e.target); }), { root: $('main'), rootMargin: '2500px 0px' });
+    $('content').querySelectorAll('.mj').forEach(el => mathObs.observe(el));
+  } else $('content').querySelectorAll('.mj').forEach(drawMath);
+}
+function drawMathAround(i) { // draw the equations near the reading position first so scrolling lands in the right spot
+  for (let k = Math.max(0, i - 80); k < Math.min(els.length, i + 80); k++) (els[k] || []).forEach(e => e.querySelectorAll('.mj').forEach(drawMath));
+}
 
 function openBook(b) {
   stop();
@@ -80,7 +101,9 @@ function openBook(b) {
     $('content').querySelectorAll('[data-i]').forEach(e => { (els[+e.dataset.i] = els[+e.dataset.i] || []).push(e); });
     idx = Math.min(b.pos || 0, Math.max(0, units.length - 1));
     if (b.total !== units.length) { b.total = units.length; store.put(b); }
+    setupMath(doc.maths);
     cacheClear(); status(null);
+    drawMathAround(idx);
     mark(idx, true);
   }, 20);
 }
