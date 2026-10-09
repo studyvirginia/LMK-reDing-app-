@@ -1,4 +1,6 @@
-/* Book Reader UI: library, rendering, playback. */
+/* Book Reader UI: library, chunked rendering, playback.
+   A book is split into sections ("chunks"). Only the sections near the screen exist in the page,
+   so a 900-page book costs about the same as a 30-page one. */
 (function () {
 'use strict';
 const $ = id => document.getElementById(id);
@@ -10,7 +12,9 @@ let settings = Object.assign({}, DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem('br.settings') || '{}')); } catch (e) {}
 const saveSettings = () => { try { localStorage.setItem('br.settings', JSON.stringify(settings)); } catch (e) {} };
 
-/* ---------- storage (IndexedDB; falls back to memory) ---------- */
+/* ---------- storage (IndexedDB; falls back to memory) ----------
+   Book metadata (name, place, progress) is tiny and saved often. The book text lives in its own
+   record ('t:<id>') and is written once, so reading a 3 MB book never rewrites 3 MB every few seconds. */
 const mem = new Map();
 let dbp = null;
 try {
@@ -23,14 +27,18 @@ try {
 function tx(mode, fn) {
   return dbp.then(d => new Promise((res, rej) => {
     const t = d.transaction('books', mode); const rq = fn(t.objectStore('books'));
-    t.oncomplete = () => res(rq && rq.result); t.onerror = () => rej(t.error);
+    t.oncomplete = () => res(rq && rq.result); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
   }));
 }
 const store = {
   all: () => tx('readonly', s => s.getAll()).catch(() => [...mem.values()]),
   put: b => tx('readwrite', s => s.put(b)).catch(() => { mem.set(b.id, b); }),
-  del: id => tx('readwrite', s => s.delete(id)).catch(() => { mem.delete(id); })
+  get: id => tx('readonly', s => s.get(id)).catch(() => mem.get(id)),
+  del: id => tx('readwrite', s => { s.delete(id); return s.delete('t:' + id); }).catch(() => { mem.delete(id); mem.delete('t:' + id); }),
+  putText: (id, text) => store.put({ id: 't:' + id, text }),
+  getText: async id => { const r = await store.get('t:' + id); return r ? r.text : null; }
 };
+const metaOf = b => { const m = Object.assign({}, b); delete m.text; return m; };
 
 /* ---------- status toast ---------- */
 let statusTimer = 0;
@@ -40,90 +48,147 @@ function status(msg, ms) {
   el.textContent = msg; el.style.display = 'block';
   if (ms) statusTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
 }
-
 $('status').onclick = () => status(null);
 
 /* ---------- state ---------- */
 let books = [];
 let book = null;
-let units = [];
-let els = [];
-let idx = 0;
+let chunks = [];      // {text, chars, before, units, html, maths, els, attached, mobs}
+let secs = [];        // <section> element per chunk
+let totalChars = 1;
+let cc = 0, ci = 0;   // playhead: chunk index, sentence index within chunk
 let playing = false;
 let playToken = 0;
 let saveTimer = 0;
+let pxPerChar = 0.5;  // learned: how tall a chunk is per character, to size sections that aren't built yet
+let chunkObs = null;
+let openStamp = 0;
 
-/* ---------- rendering ---------- */
+/* ---------- building and showing chunks ---------- */
 function renderMath(tex, display) {
   try { return katex.renderToString(tex, { displayMode: display, throwOnError: false, strict: false, trust: false, output: 'html' }); }
   catch (e) { return Core.esc(tex); }
 }
 marked.setOptions({ gfm: true, breaks: false });
-const env = () => ({
-  lazyMath: true,
-  renderMath,
-  parseInline: s => marked.parseInline(s),
-  parseBlock: s => marked.parse(s)
-});
-const isTex = b => b.type === 'tex' || /\\documentclass|\\begin\{document\}/.test(b.text);
+const env = () => ({ lazyMath: true, renderMath, parseInline: s => marked.parseInline(s), parseBlock: s => marked.parse(s) });
+const looksTex = (b, text) => b.type === 'tex' || /\\documentclass|\\begin\{document\}/.test(text.slice(0, 20000));
 
-
-/* lazy math: draw an equation only when it scrolls near the screen */
-let mathList = [], mathObs = null;
-function drawMath(el) {
+function ensureData(c) { // turn the raw text of a chunk into sentences + html (no DOM work)
+  const ch = chunks[c];
+  if (!ch.units) { const d = Core.buildDocument(ch.text, env()); ch.units = d.units; ch.html = d.html; ch.maths = d.maths; }
+  return ch;
+}
+function drawMath(ch, el) {
   if (el.dataset.done) return; el.dataset.done = '1';
-  const m = mathList[+el.dataset.m]; if (m) el.innerHTML = renderMath(m.tex, m.display);
-  if (mathObs) mathObs.unobserve(el);
+  const m = ch.maths[+el.dataset.m]; if (m) el.innerHTML = renderMath(m.tex, m.display);
 }
-function setupMath(maths) {
-  if (mathObs) mathObs.disconnect();
-  mathList = maths;
+function attach(c) {
+  const ch = chunks[c]; if (!ch || ch.attached) return;
+  ensureData(c);
+  const sec = secs[c];
+  sec.innerHTML = ch.html; sec.style.minHeight = ''; ch.attached = true; ch.els = [];
+  sec.querySelectorAll('[data-i]').forEach(e => { (ch.els[+e.dataset.i] = ch.els[+e.dataset.i] || []).push(e); });
+  const mjs = sec.querySelectorAll('.mj');
   if ('IntersectionObserver' in window) {
-    mathObs = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) drawMath(e.target); }), { root: $('main'), rootMargin: '2500px 0px' });
-    $('content').querySelectorAll('.mj').forEach(el => mathObs.observe(el));
-  } else $('content').querySelectorAll('.mj').forEach(drawMath);
+    ch.mobs = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { drawMath(ch, e.target); ch.mobs.unobserve(e.target); } }), { root: $('main'), rootMargin: '2500px 0px' });
+    mjs.forEach(el => ch.mobs.observe(el));
+  } else mjs.forEach(el => drawMath(ch, el));
+  const h = sec.offsetHeight; if (h && ch.chars > 2000) pxPerChar = pxPerChar * 0.7 + 0.3 * (h / ch.chars);
+  if (c === cc) (ch.els[ci] || []).forEach(e => e.classList.add('active'));
 }
-function drawMathAround(i) { // draw the equations near the reading position first so scrolling lands in the right spot
-  for (let k = Math.max(0, i - 80); k < Math.min(els.length, i + 80); k++) (els[k] || []).forEach(e => e.querySelectorAll('.mj').forEach(drawMath));
+function detach(c) {
+  const ch = chunks[c]; if (!ch || !ch.attached) return;
+  const sec = secs[c]; sec.style.minHeight = sec.offsetHeight + 'px'; sec.innerHTML = '';
+  if (ch.mobs) { ch.mobs.disconnect(); ch.mobs = null; }
+  ch.els = []; ch.attached = false;
 }
-
-function openBook(b) {
-  stop();
-  book = b; settings.cur = b.id; saveSettings();
-  $('title').textContent = b.name;
-  status('Rendering…');
-  setTimeout(() => {
-    const src = isTex(b) ? Core.texToMd(b.text) : b.text;
-    const doc = Core.buildDocument(src, env());
-    units = doc.units;
-    $('content').innerHTML = doc.html || '<div class="empty">This file has no readable text.</div>';
-    els = [];
-    $('content').querySelectorAll('[data-i]').forEach(e => { (els[+e.dataset.i] = els[+e.dataset.i] || []).push(e); });
-    idx = Math.min(b.pos || 0, Math.max(0, units.length - 1));
-    if (b.total !== units.length) { b.total = units.length; store.put(b); }
-    setupMath(doc.maths);
-    cacheClear(); status(null);
-    drawMathAround(idx);
-    mark(idx, true);
-  }, 20);
+function drawMathAround(c, i) { // draw equations near the playhead right away so scrolling lands in the right spot
+  const ch = chunks[c]; if (!ch || !ch.attached) return;
+  for (let k = Math.max(0, i - 80); k < Math.min(ch.els.length, i + 80); k++) (ch.els[k] || []).forEach(e => e.querySelectorAll('.mj').forEach(m => drawMath(ch, m)));
 }
 
-function mark(i, scroll) {
-  document.querySelectorAll('.s.active').forEach(e => e.classList.remove('active'));
-  (els[i] || []).forEach(e => e.classList.add('active'));
-  if (scroll !== false && els[i] && els[i][0]) els[i][0].scrollIntoView({ block: 'center' });
-  const n = units.length, pct = n ? Math.round(((i + 1) / n) * 100) : 0;
-  $('prog').textContent = n ? (i + 1) + ' / ' + n + ' · ' + pct + '%' : '';
+/* walk sentences across chunk boundaries; returns [chunk, index] or null at either end of the book */
+function stepPos(c, i, d) {
+  i += d;
+  for (;;) {
+    if (c < 0 || c >= chunks.length) return null;
+    const n = ensureData(c).units.length;
+    if (i >= 0 && i < n) return [c, i];
+    if (d > 0) { c++; i = 0; } else { c--; if (c < 0) return null; i = ensureData(c).units.length - 1; }
+  }
+}
+const firstPos = c => { const p = stepPos(Math.max(0, c), -1, 1); return p || stepPos(chunks.length - 1, 0, -1) || [0, 0]; };
+
+function progress() {
+  const ch = chunks[cc]; if (!ch) return 0;
+  const n = (ch.units && ch.units.length) || 1;
+  const pct = Math.min(100, Math.max(0, Math.round(100 * (ch.before + ch.chars * (ci / n)) / totalChars)));
+  $('prog').textContent = 'Part ' + (cc + 1) + '/' + chunks.length + ' · ' + pct + '%';
   $('barfill').style.width = pct + '%';
+  return pct;
+}
+function mark(scroll) {
+  document.querySelectorAll('.s.active').forEach(e => e.classList.remove('active'));
+  if (!chunks[cc]) return;
+  attach(cc);
+  const els = chunks[cc].els[ci] || [];
+  els.forEach(e => e.classList.add('active'));
+  drawMathAround(cc, ci);
+  if (scroll !== false && els[0]) {
+    const m = $('main');
+    if (scroll === 'jump') m.style.scrollBehavior = 'auto'; // no slow glide when restoring a place
+    els[0].scrollIntoView({ block: 'center' });
+    if (scroll === 'jump') m.style.scrollBehavior = '';
+  }
+  progress();
+}
+
+async function openBook(b) {
+  stop();
+  status('Opening…');
+  let text = await store.getText(b.id);
+  if (text == null) { status('Could not find this book’s text on this device. Delete it and add it again.'); return; }
+  book = b; settings.cur = b.id; saveSettings(); $('title').textContent = b.name;
+  await new Promise(r => setTimeout(r, 10)); // let "Opening…" paint
+  const src = (looksTex(b, text) ? Core.texToMd(text) : text).replace(/\r\n?/g, '\n').replace(/\t/g, '    ');
+  const parts = Core.splitChunks(src);
+  text = null;
+  if (chunkObs) chunkObs.disconnect();
+  chunks = parts.map(t => ({ text: t, chars: t.length, units: null, html: '', maths: [], els: [], attached: false, mobs: null }));
+  let acc = 0; chunks.forEach(ch => { ch.before = acc; acc += ch.chars; }); totalChars = acc || 1;
+  const content = $('content'); content.textContent = '';
+  secs = chunks.map((ch, c) => {
+    const s = document.createElement('section'); s.className = 'chunk'; s.dataset.c = c; s.style.minHeight = Math.round(ch.chars * pxPerChar) + 'px';
+    content.appendChild(s); return s;
+  });
+  const p0 = b.pos && typeof b.pos === 'object' ? b.pos : { c: 0, u: 0 };
+  cc = Math.max(0, Math.min(chunks.length - 1, p0.c | 0)); ci = Math.max(0, p0.u | 0);
+  const n = ensureData(cc).units.length;
+  if (ci >= n) { const p = firstPos(cc); cc = p[0]; ci = p[1]; }
+  if (!stepPos(0, -1, 1)) { content.innerHTML = '<div class="empty">This file has no readable text.</div>'; chunks = []; secs = []; status(null); return; }
+  cacheClear();
+  mark('jump');
+  status(null);
+  if ('IntersectionObserver' in window) {
+    chunkObs = new IntersectionObserver(es => es.forEach(e => {
+      const c = +e.target.dataset.c;
+      if (e.isIntersecting) attach(c); else if (Math.abs(c - cc) > 1) detach(c);
+    }), { root: $('main'), rootMargin: '3000px 0px' });
+    secs.forEach(s => chunkObs.observe(s));
+  }
+  // neighbouring sections finish building a moment later and can nudge the page; re-centre once they have settled
+  const stamp = ++openStamp, c0 = cc, i0 = ci;
+  [150, 600].forEach(ms => setTimeout(() => { if (stamp === openStamp && cc === c0 && ci === i0 && !playing) mark('jump'); }, ms));
+  savePos();
 }
 
 function savePos() {
   if (!book) return;
-  book.pos = idx; book.updated = Date.now();
+  book.pos = { c: cc, u: ci }; book.pct = progress(); book.updated = Date.now();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => store.put(book), 500);
+  saveTimer = setTimeout(() => store.put(metaOf(book)), 500);
 }
-window.addEventListener('pagehide', () => { if (book) { book.pos = idx; store.put(book); } });
+window.addEventListener('pagehide', () => { if (book) { book.pos = { c: cc, u: ci }; store.put(metaOf(book)); } });
 
 /* ---------- natural voice (Kokoro, runs in the browser) ---------- */
 const KVOICES = [['af_heart', 'Heart (US female)'], ['af_bella', 'Bella (US female)'], ['af_nicole', 'Nicole (US female)'], ['af_sarah', 'Sarah (US female)'],
@@ -131,8 +196,9 @@ const KVOICES = [['af_heart', 'Heart (US female)'], ['af_bella', 'Bella (US fema
   ['bf_emma', 'Emma (UK female)'], ['bf_isabella', 'Isabella (UK female)'], ['bm_george', 'George (UK male)'], ['bm_lewis', 'Lewis (UK male)']];
 let kokoro = null, kokoroP = null, synthChain = Promise.resolve();
 const audioCache = new Map();
-const cacheKey = i => book.id + '|' + settings.kvoice + '|' + i;
-function cacheClear() { audioCache.forEach(p => p.then(u => u.forEach(URL.revokeObjectURL)).catch(() => {})); audioCache.clear(); }
+let keep = new Set();
+const akey = (c, i) => book.id + '|' + settings.kvoice + '|' + c + '|' + i;
+function cacheClear() { audioCache.forEach(p => p.then(u => u.forEach(URL.revokeObjectURL)).catch(() => {})); audioCache.clear(); keep = new Set(); }
 
 async function loadKokoro() {
   if (kokoro) return kokoro;
@@ -156,10 +222,10 @@ function wavBlob(f32, rate) {
   for (let k = 0; k < n; k++) b.setInt16(44 + k * 2, Math.max(-1, Math.min(1, f32[k])) * 32767, true);
   return new Blob([b], { type: 'audio/wav' });
 }
-function synth(i) {
-  const key = cacheKey(i);
+function synth(c, i) {
+  const key = akey(c, i);
   if (audioCache.has(key)) return audioCache.get(key);
-  const text = units[i].speak, voice = settings.kvoice;
+  const text = chunks[c].units[i].speak, voice = settings.kvoice;
   const p = synthChain.catch(() => {}).then(async () => {
     const urls = [];
     for (const chunk of Core.chunkForTTS(text)) {
@@ -171,8 +237,8 @@ function synth(i) {
   synthChain = p;
   audioCache.set(key, p);
   p.catch(() => audioCache.delete(key));
-  // drop audio well behind the playhead (measured from what is being READ, not what is being prepared)
-  audioCache.forEach((v, k) => { const n = +k.split('|')[2]; if (n < idx - 2) { v.then(u => u.forEach(URL.revokeObjectURL)).catch(() => {}); audioCache.delete(k); } });
+  // drop audio that is no longer near the playhead (decided by the playhead window, not by what is being prepared)
+  audioCache.forEach((v, k) => { if (!keep.has(k)) { v.then(u => u.forEach(URL.revokeObjectURL)).catch(() => {}); audioCache.delete(k); } });
   return p;
 }
 // One reusable <audio> element. Phones only allow audio from an element that was started inside a tap,
@@ -213,9 +279,18 @@ function speakDevice(text, token) {
 /* ---------- playback loop ---------- */
 let forceDevice = false; // set when the natural voice fails; lasts until the page reloads, never saved
 const errText = e => (e && (e.name ? e.name + ': ' : '') + (e.message || e)) || String(e);
+function windowAround() { // sentences to keep audio for: 2 behind, 3 ahead
+  const fwd = [], back = [];
+  let p = [cc, ci];
+  for (let k = 0; k < 3; k++) { p = stepPos(p[0], p[1], 1); if (!p) break; fwd.push(p); }
+  p = [cc, ci];
+  for (let k = 0; k < 2; k++) { p = stepPos(p[0], p[1], -1); if (!p) break; back.push(p); }
+  return { fwd, back };
+}
 async function run(token) {
-  while (token === playToken && idx < units.length) {
-    mark(idx);
+  while (token === playToken) {
+    mark();
+    const c = cc, i = ci;
     try {
       if (settings.engine === 'kokoro' && !forceDevice) {
         try { await loadKokoro(); }
@@ -225,8 +300,10 @@ async function run(token) {
           forceDevice = true;
           continue;
         }
-        const mine = synth(idx);
-        for (let k = 1; k <= 3 && idx + k < units.length; k++) synth(idx + k);
+        const w = windowAround();
+        keep = new Set([akey(c, i)].concat(w.fwd.map(p => akey(p[0], p[1])), w.back.map(p => akey(p[0], p[1]))));
+        const mine = synth(c, i);
+        w.fwd.forEach(p => synth(p[0], p[1]));
         status('Preparing voice…');
         let urls;
         try { urls = await mine; }
@@ -248,21 +325,22 @@ async function run(token) {
           continue;
         }
       } else {
-        await speakDevice(units[idx].speak, token);
+        await speakDevice(chunks[c].units[i].speak, token);
       }
     } catch (e) { console.error(e); status('Playback error: ' + errText(e) + '. Tap here to dismiss.'); break; }
     if (token !== playToken) return;
-    if (idx >= units.length - 1) break;
-    idx++; savePos();
+    const n = stepPos(cc, ci, 1);
+    if (!n) break;
+    cc = n[0]; ci = n[1]; savePos();
   }
   if (token === playToken) { playing = false; savePos(); syncPlay(); }
 }
-function start(i) {
-  if (!units.length) return;
+function start(c, i) {
+  if (!chunks.length) return;
   unlockAudio(); // must happen synchronously inside the tap
   stop(true);
   forceDevice = false; // retry the natural voice on every fresh play
-  if (i != null) idx = Math.max(0, Math.min(units.length - 1, i));
+  if (c != null) { cc = c; ci = i; }
   playing = true; syncPlay(); savePos();
   run(++playToken);
 }
@@ -274,9 +352,10 @@ function stop(keepFlag) {
 }
 function toggle() { playing ? stop() : start(); }
 function skip(d) {
-  if (!units.length) return;
-  const n = Math.max(0, Math.min(units.length - 1, idx + d));
-  if (playing) start(n); else { idx = n; mark(idx); savePos(); }
+  if (!chunks.length) return;
+  const n = d === 0 ? [cc, ci] : stepPos(cc, ci, d);
+  if (!n) return;
+  if (playing) start(n[0], n[1]); else { cc = n[0]; ci = n[1]; mark(); savePos(); }
 }
 function syncPlay() {
   $('btnPlay').innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
@@ -291,16 +370,24 @@ if ('mediaSession' in navigator) {
 }
 
 /* ---------- library ---------- */
-async function refreshBooks() { books = (await store.all()).sort((a, b) => (b.updated || 0) - (a.updated || 0)); renderLibrary(); }
+async function refreshBooks() {
+  const all = await store.all();
+  books = all.filter(r => !String(r.id).startsWith('t:'));
+  for (const b of books) { // move text out of old-style records so it is not rewritten on every save
+    if (typeof b.text === 'string') { await store.putText(b.id, b.text); delete b.text; await store.put(metaOf(b)); }
+  }
+  books.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  renderLibrary();
+}
 function renderLibrary() {
   const box = $('books'); box.textContent = '';
   if (!books.length) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = 'No books yet. Add a file or paste text below.'; box.appendChild(d); return; }
   for (const b of books) {
-    const pct = b.total ? Math.round((((b.pos || 0) + 1) / b.total) * 100) : 0;
+    const pct = b.pct || 0;
     const row = document.createElement('div'); row.className = 'book' + (book && book.id === b.id ? ' cur' : '');
     const nm = document.createElement('div'); nm.className = 'nm';
     const t = document.createElement('b'); t.textContent = b.name;
-    const sm = document.createElement('small'); sm.textContent = b.total ? pct + '% · sentence ' + ((b.pos || 0) + 1) + ' of ' + b.total : 'not opened yet';
+    const sm = document.createElement('small'); sm.textContent = b.pct != null ? pct + '% read' : 'not opened yet';
     const meter = document.createElement('div'); meter.className = 'meter'; const fill = document.createElement('i'); fill.style.width = pct + '%'; meter.appendChild(fill);
     nm.append(t, sm, meter);
     const x = document.createElement('button'); x.className = 'x'; x.textContent = '✕'; x.title = 'Delete';
@@ -308,7 +395,7 @@ function renderLibrary() {
       ev.stopPropagation();
       if (!confirm('Delete "' + b.name + '" from this device?')) return;
       await store.del(b.id);
-      if (book && book.id === b.id) { stop(); book = null; units = []; $('content').innerHTML = welcome(); $('title').textContent = 'Book Reader'; $('prog').textContent = ''; $('barfill').style.width = '0'; }
+      if (book && book.id === b.id) { stop(); book = null; chunks = []; secs = []; $('content').innerHTML = welcome(); $('title').textContent = 'Book Reader'; $('prog').textContent = ''; $('barfill').style.width = '0'; }
       refreshBooks();
     };
     row.append(nm, x);
@@ -317,17 +404,21 @@ function renderLibrary() {
   }
 }
 async function addBook(name, text, type) {
-  const b = { id: 'b' + Date.now() + Math.random().toString(36).slice(2, 6), name, text, type, pos: 0, total: 0, updated: Date.now() };
-  await store.put(b); return b;
+  const b = { id: 'b' + Date.now() + Math.random().toString(36).slice(2, 6), name, type, pos: { c: 0, u: 0 }, pct: 0, updated: Date.now() };
+  await store.putText(b.id, text); await store.put(b); return b;
 }
+const notText = (name, text) => /\.(pdf|epub|docx?|pptx?|rtf|png|jpe?g|gif|zip)$/i.test(name) || text.startsWith('%PDF') || text.slice(0, 4000).indexOf('\u0000') >= 0 || text.slice(0, 4000).indexOf('�') >= 0;
 $('btnFiles').onclick = () => $('files').click();
 $('files').onchange = async e => {
   let last = null;
   for (const f of e.target.files) {
+    status('Reading ' + f.name + '…');
     const text = await f.text();
+    if (notText(f.name, text)) { status(null); alert('"' + f.name + '" is not a text file (PDF, Word and e-book files can’t be read directly).\n\nExport or convert it to Markdown (.md), LaTeX (.tex) or plain text (.txt) and add that instead.'); continue; }
+    status('Saving ' + f.name + '…');
     last = await addBook(f.name.replace(/\.[^.]+$/, ''), text, /\.tex$/i.test(f.name) ? 'tex' : 'md');
   }
-  e.target.value = '';
+  status(null); e.target.value = '';
   await refreshBooks();
   if (last) { $('dlgLib').close(); openBook(last); }
 };
@@ -362,7 +453,7 @@ function fillSelects() {
   };
   fillDev(); if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = fillDev;
 }
-const restartIfPlaying = () => { if (playing) start(idx); };
+const restartIfPlaying = () => { if (playing) start(cc, ci); };
 $('engine').onchange = e => { settings.engine = e.target.value; saveSettings(); syncSettingsUI(); restartIfPlaying(); };
 $('kvoice').onchange = e => { settings.kvoice = e.target.value; saveSettings(); cacheClear(); restartIfPlaying(); };
 $('dvoice').onchange = e => { settings.dvoice = e.target.value; saveSettings(); restartIfPlaying(); };
@@ -376,7 +467,8 @@ $('btnPrev').onclick = () => skip(-1);
 $('btnNext').onclick = () => skip(1);
 $('content').addEventListener('click', e => {
   if (window.getSelection && String(window.getSelection())) return; // don't hijack text selection
-  const s = e.target.closest('.s'); if (s) start(+s.dataset.i);
+  const s = e.target.closest('.s'); if (!s) return;
+  const sec = s.closest('.chunk'); if (sec) start(+sec.dataset.c, +s.dataset.i);
 });
 document.addEventListener('keydown', e => {
   if (/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName) || document.querySelector('dialog[open]')) return;
@@ -395,5 +487,11 @@ const welcome = () => '<div class="empty"><h2>Book Reader</h2>Open <b>Library</b
   if (last) openBook(last); else $('dlgLib').showModal();
 })();
 
-window.__reader = { get units() { return units; }, get idx() { return idx; }, start, stop, skip, openBook, get books() { return books; } }; // for tests
+// small hooks for automated tests
+window.__reader = {
+  get pos() { return { c: cc, u: ci }; }, get nchunks() { return chunks.length; },
+  get attached() { return chunks.filter(c => c.attached).length; },
+  get cur() { return chunks[cc] && chunks[cc].units && chunks[cc].units[ci] && chunks[cc].units[ci].speak; },
+  get books() { return books; }, start, stop, skip, openBook
+};
 })();

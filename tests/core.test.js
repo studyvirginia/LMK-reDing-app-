@@ -37,4 +37,16 @@ eq('units', doc.units.map(u => u.speak), ['Title.', 'First sentence with x squar
 const md = C.texToMd('\\documentclass{article}\n\\begin{document}\n\\section{Intro}\nSome \\textbf{bold} text % comment\n\\begin{itemize}\\item A\\item B\\end{itemize}\n\\begin{equation}E=mc^2\\end{equation}\n\\end{document}');
 console.log(md);
 eq('tex has heading', /## Intro/.test(md) && /\*\*bold\*\*/.test(md) && !/comment/.test(md), true);
+
+// code is never math
+const CM = C.extractMath('Run `echo $HOME $1` then:\n\n```bash\nP=$HOME; echo $1 $2\n```\n\nAnd $x^2$ is math.');
+eq('code not math', CM.maths.map(m => m.tex), ['x^2']);
+eq('code preserved', /echo \$HOME \$1/.test(CM.text) && /P=\$HOME; echo \$1 \$2/.test(CM.text), true);
+
+// chunking never splits inside code or display math, and loses nothing
+let big = ''; for (let i = 0; i < 300; i++) big += '# Ch ' + i + '\n\n' + 'Text '.repeat(200) + '\n\n$$\na = b\n\nc = d\n$$\n\n```\ncode\n\n# not a heading\n```\n\n';
+const chs = C.splitChunks(big, 3000, 9000);
+eq('chunks rejoin', chs.join('\n'), big);
+eq('chunks > 1', chs.length > 10, true);
+eq('no chunk breaks a fence/display', chs.every(c => ((c.match(/```/g) || []).length % 2 === 0) && ((c.match(/\$\$/g) || []).length % 2 === 0)), true);
 console.log(fail ? fail + ' FAILED' : 'ALL PASS'); process.exit(fail ? 1 : 0);

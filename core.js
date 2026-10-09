@@ -264,8 +264,11 @@ const MATH_RE = new RegExp([
   '(?<![\\\\$])\\$(?![\\s$])((?:\\\\.|[^$\\\\])+?)(?<![\\s\\\\])\\$(?!\\d)'
 ].join('|'), 'g');
 
-function extractMath(text) {
-  const maths = [];
+function extractMath(text0) {
+  const maths = [], codes = [];
+  // hide code first so `$HOME` or `$1 $2` in a shell snippet is never mistaken for math
+  const text = text0.replace(/(```|~~~)[\s\S]*?(\1|$)|`[^`\n]+`/g, m => { codes.push(m); return '\u0001' + (codes.length - 1) + '\u0001'; });
+  const unhide = s => s.replace(/\u0001(\d+)\u0001/g, (m, i) => codes[+i]);
   const out = text.replace(MATH_RE, (m, dd, br, envName, envBody, par, inl) => {
     let tex, display = true;
     if (dd != null) tex = dd;
@@ -281,7 +284,8 @@ function extractMath(text) {
     const tok = '⟦' + (maths.length - 1) + '⟧';
     return display ? '\n\n' + tok + '\n\n' : tok;
   });
-  return { text: out, maths };
+  maths.forEach(m => { m.tex = unhide(m.tex); });
+  return { text: unhide(out), maths };
 }
 
 /* ---------- sentences ---------- */
@@ -416,6 +420,33 @@ function buildDocument(raw, env) {
   return { html, units, maths };
 }
 
+
+/* ---------- chunking (a 900-page book is built and shown a section at a time) ---------- */
+
+function splitChunks(src, minChars, maxChars) {
+  minChars = minChars || 6000; maxChars = maxChars || 30000;
+  const lines = src.split('\n');
+  const chunks = [];
+  let cur = [], size = 0, fence = null, display = false, envOpen = false;
+  const flush = () => { if (cur.length) { chunks.push(cur.join('\n')); cur = []; size = 0; } };
+  for (const line of lines) {
+    const clean = !fence && !display && !envOpen;
+    if (clean && size >= minChars && /^#{1,2}\s/.test(line)) flush();
+    else if (clean && size >= maxChars && /^\s*$/.test(line)) { cur.push(line); flush(); continue; }
+    cur.push(line); size += line.length + 1;
+    const f = /^\s*(```|~~~)/.exec(line);
+    if (f) fence = fence ? (f[1] === fence ? null : fence) : f[1];
+    if (!fence) {
+      if (((line.match(/\$\$/g) || []).length) % 2) display = !display;
+      if (/\\begin\{(equation|align|gather|multline|eqnarray|displaymath)\*?\}/.test(line) && !/\\end\{/.test(line)) envOpen = true;
+      else if (/\\end\{(equation|align|gather|multline|eqnarray|displaymath)\*?\}/.test(line)) envOpen = false;
+      if (/^\s*\\\[\s*$/.test(line)) display = true; else if (/^\s*\\\]\s*$/.test(line)) display = false;
+    }
+  }
+  flush();
+  return chunks;
+}
+
 /* ---------- TTS chunking ---------- */
 
 function chunkForTTS(t, max) {
@@ -432,6 +463,6 @@ function chunkForTTS(t, max) {
   return fin;
 }
 
-const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, esc };
+const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, splitChunks, esc };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.BookCore = api;
 })(typeof self !== 'undefined' ? self : this);
