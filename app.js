@@ -41,6 +41,8 @@ function status(msg, ms) {
   if (ms) statusTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
 }
 
+$('status').onclick = () => status(null);
+
 /* ---------- state ---------- */
 let books = [];
 let book = null;
@@ -49,7 +51,6 @@ let els = [];
 let idx = 0;
 let playing = false;
 let playToken = 0;
-let curAudio = null;
 let saveTimer = 0;
 
 /* ---------- rendering ---------- */
@@ -136,28 +137,40 @@ function synth(i) {
   const key = cacheKey(i);
   if (audioCache.has(key)) return audioCache.get(key);
   const text = units[i].speak, voice = settings.kvoice;
-  const p = (synthChain = synthChain.then(async () => {
+  const p = synthChain.catch(() => {}).then(async () => {
     const urls = [];
     for (const chunk of Core.chunkForTTS(text)) {
       const a = await kokoro.generate(chunk, { voice, speed: 1 });
       urls.push(URL.createObjectURL(a.toBlob ? a.toBlob() : wavBlob(a.audio, a.sampling_rate)));
     }
     return urls;
-  }));
+  });
+  synthChain = p;
   audioCache.set(key, p);
   p.catch(() => audioCache.delete(key));
-  // drop audio well behind the playhead
-  audioCache.forEach((v, k) => { const n = +k.split('|')[2]; if (n < i - 2) { v.then(u => u.forEach(URL.revokeObjectURL)).catch(() => {}); audioCache.delete(k); } });
+  // drop audio well behind the playhead (measured from what is being READ, not what is being prepared)
+  audioCache.forEach((v, k) => { const n = +k.split('|')[2]; if (n < idx - 2) { v.then(u => u.forEach(URL.revokeObjectURL)).catch(() => {}); audioCache.delete(k); } });
   return p;
 }
-function playUrls(urls, token) {
-  return urls.reduce((chain, url) => chain.then(() => new Promise(res => {
-    if (token !== playToken) return res();
-    const a = new Audio(url); curAudio = a;
-    a.playbackRate = settings.speed; a.preservesPitch = true;
-    a.onended = a.onerror = () => res();
-    a.play().catch(() => res());
-  })), Promise.resolve());
+// One reusable <audio> element. Phones only allow audio from an element that was started inside a tap,
+// and generating speech takes long enough that the tap has expired, so we "unlock" it on the tap itself.
+const player = new Audio();
+player.preload = 'auto';
+const SILENCE = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+function unlockAudio() {
+  try { player.src = SILENCE; const p = player.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+}
+async function playUrls(urls, token) {
+  for (const url of urls) {
+    if (token !== playToken) return;
+    await new Promise((res, rej) => {
+      player.onended = () => res();
+      player.onerror = () => rej(new Error('the browser could not play the generated audio' + (player.error ? ' (code ' + player.error.code + (player.error.message ? ': ' + player.error.message : '') + ')' : '')));
+      player.src = url;
+      player.defaultPlaybackRate = settings.speed; player.playbackRate = settings.speed; player.preservesPitch = true;
+      player.play().catch(rej);
+    });
+  }
 }
 
 /* ---------- device voice (Web Speech API) ---------- */
@@ -175,27 +188,46 @@ function speakDevice(text, token) {
 }
 
 /* ---------- playback loop ---------- */
+let forceDevice = false; // set when the natural voice fails; lasts until the page reloads, never saved
+const errText = e => (e && (e.name ? e.name + ': ' : '') + (e.message || e)) || String(e);
 async function run(token) {
   while (token === playToken && idx < units.length) {
     mark(idx);
     try {
-      if (settings.engine === 'kokoro') {
+      if (settings.engine === 'kokoro' && !forceDevice) {
         try { await loadKokoro(); }
         catch (e) {
           console.error(e);
-          status('Natural voice could not load (offline?). Using device voice.', 5000);
-          settings.engine = 'device'; saveSettings(); syncSettingsUI();
+          status('Natural voice could not load (' + errText(e) + '). Using the device voice for now. Tap here to dismiss.');
+          forceDevice = true;
           continue;
         }
         const mine = synth(idx);
         for (let k = 1; k <= 3 && idx + k < units.length; k++) synth(idx + k);
-        const urls = await mine;
+        status('Preparing voice…');
+        let urls;
+        try { urls = await mine; }
+        catch (e) {
+          console.error(e);
+          status('Natural voice failed while speaking (' + errText(e) + '). Using the device voice for now. Tap here to dismiss.');
+          forceDevice = true;
+          continue;
+        }
+        status(null);
         if (token !== playToken) return;
-        await playUrls(urls, token);
+        try { await playUrls(urls, token); }
+        catch (e) {
+          if (token !== playToken) return;
+          console.error(e);
+          if (e && e.name === 'NotAllowedError') { status('Your browser blocked the audio. Tap ▶ again.'); playing = false; syncPlay(); return; }
+          status('Audio playback failed (' + errText(e) + '). Using the device voice for now. Tap here to dismiss.');
+          forceDevice = true;
+          continue;
+        }
       } else {
         await speakDevice(units[idx].speak, token);
       }
-    } catch (e) { console.error(e); status('Playback error: ' + (e.message || e), 5000); break; }
+    } catch (e) { console.error(e); status('Playback error: ' + errText(e) + '. Tap here to dismiss.'); break; }
     if (token !== playToken) return;
     if (idx >= units.length - 1) break;
     idx++; savePos();
@@ -204,14 +236,16 @@ async function run(token) {
 }
 function start(i) {
   if (!units.length) return;
+  unlockAudio(); // must happen synchronously inside the tap
   stop(true);
+  forceDevice = false; // retry the natural voice on every fresh play
   if (i != null) idx = Math.max(0, Math.min(units.length - 1, i));
   playing = true; syncPlay(); savePos();
   run(++playToken);
 }
 function stop(keepFlag) {
   playToken++;
-  if (curAudio) { curAudio.pause(); curAudio = null; }
+  player.pause();
   if ('speechSynthesis' in window) speechSynthesis.cancel();
   if (!keepFlag) { playing = false; syncPlay(); }
 }
@@ -309,7 +343,7 @@ const restartIfPlaying = () => { if (playing) start(idx); };
 $('engine').onchange = e => { settings.engine = e.target.value; saveSettings(); syncSettingsUI(); restartIfPlaying(); };
 $('kvoice').onchange = e => { settings.kvoice = e.target.value; saveSettings(); cacheClear(); restartIfPlaying(); };
 $('dvoice').onchange = e => { settings.dvoice = e.target.value; saveSettings(); restartIfPlaying(); };
-$('speed').onchange = e => { settings.speed = +e.target.value; saveSettings(); if (curAudio) curAudio.playbackRate = settings.speed; else restartIfPlaying(); };
+$('speed').onchange = e => { settings.speed = +e.target.value; saveSettings(); player.playbackRate = settings.speed; if (playing && (settings.engine === 'device' || forceDevice)) restartIfPlaying(); };
 $('fs').oninput = e => { settings.fs = +e.target.value; saveSettings(); syncSettingsUI(); };
 $('wrap').onchange = e => { settings.wrap = e.target.checked; saveSettings(); syncSettingsUI(); };
 
