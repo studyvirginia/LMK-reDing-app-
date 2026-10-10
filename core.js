@@ -226,6 +226,56 @@ function texToSpeech(src) {
   return clean(out.join(' '));
 }
 
+
+/* ---------- code -> speech ---------- */
+
+const LANGS = { py: 'Python', python: 'Python', js: 'JavaScript', javascript: 'JavaScript', ts: 'TypeScript', typescript: 'TypeScript', jsx: 'JSX', tsx: 'TSX',
+  sh: 'shell', bash: 'shell', zsh: 'shell', shell: 'shell', c: 'C', cpp: 'C plus plus', 'c++': 'C plus plus', cs: 'C sharp', 'c#': 'C sharp', java: 'Java', go: 'Go',
+  rs: 'Rust', rust: 'Rust', rb: 'Ruby', ruby: 'Ruby', php: 'PHP', sql: 'SQL', r: 'R', json: 'JSON', yaml: 'YAML', yml: 'YAML', html: 'HTML', css: 'CSS',
+  xml: 'XML', kt: 'Kotlin', kotlin: 'Kotlin', swift: 'Swift', lua: 'Lua', julia: 'Julia', jl: 'Julia', matlab: 'MATLAB', tex: 'LaTeX', latex: 'LaTeX', md: 'Markdown', toml: 'TOML' };
+const CODE_OPS = [['===', 'is strictly equal to'], ['!==', 'is not strictly equal to'], ['...', 'dot dot dot'], ['<<=', 'shift left equals'], ['>>=', 'shift right equals'], ['**=', 'power equals'],
+  ['==', 'is equal to'], ['!=', 'is not equal to'], ['<=', 'is less than or equal to'], ['>=', 'is greater than or equal to'], ['&&', 'and'], ['||', 'or'], ['++', 'plus plus'],
+  ['--', 'minus minus'], ['+=', 'plus equals'], ['-=', 'minus equals'], ['*=', 'times equals'], ['/=', 'divided by equals'], ['%=', 'mod equals'], ['|=', 'or equals'],
+  ['&=', 'and equals'], ['^=', 'xor equals'], ['=>', 'arrow'], ['->', 'arrow'], ['<-', 'left arrow'], ['::', 'double colon'], ['<<', 'shift left'], ['>>', 'shift right'],
+  ['**', 'to the power of'], ['??', 'or if null'], ['?.', 'optional'], [':=', 'assign']];
+const CODE_SYMS = { '=': 'equals', '+': 'plus', '-': 'minus', '*': 'times', '/': 'slash', '%': 'percent', '<': 'is less than', '>': 'is greater than', '!': 'not',
+  '?': 'question mark', ':': 'colon', ';': 'semicolon', '.': 'dot', ',': ',', '(': 'open paren', ')': 'close paren', '[': 'open bracket', ']': 'close bracket',
+  '{': 'open brace', '}': 'close brace', '&': 'ampersand', '|': 'pipe', '^': 'caret', '~': 'tilde', '$': 'dollar', '@': 'at', '#': 'hash', '\\': 'backslash' };
+
+const codeWords = s => s.replace(/_+/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').replace(/\s+/g, ' ').trim();
+const codePlain = s => s.replace(/[*#]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+// one line of code -> something worth saying. '' means "say nothing" (blank, or only closing brackets).
+function codeToSpeech(src) {
+  const t = src.replace(/\t/g, '  ').trim();
+  if (!t || /^[})\];,\s]*$/.test(t)) return '';
+  const out = [], n = t.length;
+  let i = 0;
+  while (i < n) {
+    const c = t[i], rest = t.slice(i);
+    if (c === ' ') { i++; continue; }
+    if (rest.startsWith('//') && t[i - 1] !== ':') { out.push('comment, ' + codePlain(rest.slice(2))); break; }
+    if (c === '#' && (i === 0 || t[i - 1] === ' ') && !/^#(include|define|if|ifdef|ifndef|endif|else|elif|pragma|import|!)/.test(rest)) { out.push('comment, ' + codePlain(rest.slice(1))); break; }
+    if (i === 0 && /^--(\s|$)/.test(rest)) { out.push('comment, ' + codePlain(rest.slice(2))); break; }
+    if (rest.startsWith('/*')) { const e = t.indexOf('*/', i + 2); out.push('comment, ' + codePlain(t.slice(i + 2, e < 0 ? n : e))); i = e < 0 ? n : e + 2; continue; }
+    if (i === 0 && /^\*+\/?(\s|$)/.test(rest)) { out.push(codePlain(rest)); break; } // continuation of a block comment
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1; while (j < n && (t[j] !== c || t[j - 1] === '\\')) j++;
+      out.push('quote ' + codePlain(t.slice(i + 1, j)) + ' end quote'); i = j + 1; continue;
+    }
+    let m = /^(0x[0-9a-fA-F]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(rest);
+    if (m) { out.push(m[1].replace(/_/g, '')); i += m[1].length; continue; }
+    m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
+    if (m) { out.push(codeWords(m[0])); i += m[0].length; continue; }
+    const op = CODE_OPS.find(o => rest.startsWith(o[0]));
+    if (op) { out.push(op[1]); i += op[0].length; continue; }
+    if (c === ';' && !t.slice(i + 1).trim()) { i++; continue; } // a semicolon ending the line is just punctuation
+    if (c === '/' && /\w/.test(t[i - 1] || '') && /\w/.test(t[i + 1] || '')) { out.push('slash'); i++; continue; }
+    out.push(CODE_SYMS[c] || ''); i++;
+  }
+  return out.join(' ').replace(/\s+,/g, ',').replace(/,(\s*,)+/g, ',').replace(/\s+/g, ' ').trim();
+}
+
 /* ---------- LaTeX source -> Markdown ---------- */
 
 function texToMd(src) {
@@ -335,7 +385,9 @@ function parseBlocks(text, isDisplay) {
       const fence = l.trim().slice(0, 3), buf = [l]; i++;
       while (i < lines.length && !lines[i].trim().startsWith(fence)) buf.push(lines[i++]);
       if (i < lines.length) buf.push(lines[i++]);
-      out.push({ t: 'raw', md: buf.join('\n') }); continue;
+      const closed = buf.length > 1 && buf[buf.length - 1].trim().startsWith(fence);
+      const info = /^\s*(?:```|~~~)\s*([^\s`]*)/.exec(buf[0]);
+      out.push({ t: 'code', lang: ((info && info[1]) || '').toLowerCase(), body: buf.slice(1, closed ? -1 : undefined), md: buf.join('\n') }); continue;
     }
     if ((m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(l))) { out.push({ t: 'h', level: m[1].length, md: m[2] }); i++; continue; }
     if (HR_RE.test(l)) { out.push({ t: 'raw', md: '---' }); i++; continue; }
@@ -378,8 +430,9 @@ function plainTitle(md) {
 }
 // headings of one chunk of source text (skips code blocks); n = which repeat of the same title this is
 function scanHeadings(text) {
-  const out = [], cnt = {}; let fence = null;
+  const out = [], cnt = {}; let fence = null, pos = 0;
   for (const line of text.split('\n')) {
+    const start = pos; pos += line.length + 1;
     const f = /^\s*(```|~~~)/.exec(line);
     if (f) { fence = fence ? (f[1] === fence ? null : fence) : f[1]; continue; }
     if (fence) continue;
@@ -387,7 +440,7 @@ function scanHeadings(text) {
     if (!m) continue;
     const title = plainTitle(m[2]); if (!title || !/[A-Za-z0-9]/.test(title)) continue;
     cnt[title] = cnt[title] == null ? 0 : cnt[title] + 1;
-    out.push({ level: m[1].length, title, n: cnt[title] });
+    out.push({ level: m[1].length, title, n: cnt[title], offset: start });
   }
   return out;
 }
@@ -408,7 +461,8 @@ function buildDocument(raw, env) {
 
   function inline(md) {
     const h = parseInline(md);
-    const speak = clean(htmlToText(h).replace(TOK, (m, i) => ' ' + mathSpeech(+i) + ' '));
+    const spoken = env.readCode ? h.replace(/<code>([\s\S]*?)<\/code>/g, (m, x) => ' ' + (codeToSpeech(htmlToText(x)) || htmlToText(x)) + ' ') : h;
+    const speak = clean(htmlToText(spoken).replace(TOK, (m, i) => ' ' + mathSpeech(+i) + ' '));
     const html = h.replace(TOK, (m, i) => '<span class="m">' + mathHtml(+i) + '</span>');
     return { html, speak };
   }
@@ -437,7 +491,17 @@ function buildDocument(raw, env) {
     } else if (b.t === 'math') {
       units.push({ speak: 'Equation. ' + mathSpeech(b.idx) + '.' });
       html += '<div class="s mathblock" data-i="' + (units.length - 1) + '">' + mathHtml(b.idx) + '</div>';
-    } else html += '<div class="rawblock">' + parseBlock(b.md) + '</div>';
+    } else if (b.t === 'code' && env.readCode) {
+      const name = LANGS[b.lang] || (b.lang && /^[a-z0-9+#.-]+$/.test(b.lang) ? b.lang : '');
+      units.push({ speak: 'Code block' + (name ? ' in ' + name : '') + '.' });
+      let inner = '<div class="codehead s" data-i="' + (units.length - 1) + '">' + esc(name ? name + ' code' : 'code') + '</div><pre class="code"><code>';
+      for (const line of b.body) {
+        const sp = codeToSpeech(line);
+        if (sp && /[A-Za-z0-9]/.test(sp)) { units.push({ speak: sp }); inner += '<span class="s codeline" data-i="' + (units.length - 1) + '">' + esc(line) + '</span>'; }
+        else inner += '<span class="codeline">' + (esc(line) || ' ') + '</span>';
+      }
+      html += '<div class="codeblock">' + inner + '</code></pre></div>';
+    } else html += '<div class="rawblock">' + parseBlock(b.md || '') + '</div>';
   }
   closeList();
   return { html, units, maths, headings };
@@ -486,6 +550,6 @@ function chunkForTTS(t, max) {
   return fin;
 }
 
-const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, splitChunks, scanHeadings, plainTitle, esc };
+const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, splitChunks, scanHeadings, plainTitle, codeToSpeech, esc };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.BookCore = api;
 })(typeof self !== 'undefined' ? self : this);

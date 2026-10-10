@@ -7,3 +7,16 @@ PDFs: text is extracted in the browser (headers, footers and page numbers remove
 
 Run locally: `python3 -m http.server` in this folder, then open `localhost:8000`.
 Tests: `node tests/core.test.js`
+
+
+## Natural voice
+
+The natural voice (Kokoro, 82M parameters) runs entirely in your browser in a background worker; nothing is sent anywhere.
+First use downloads the model once (about 90 MB, cached afterwards). Settings → **Test voice** checks every step and reports speed.
+Settings → **Natural voice mode → Fast (graphics chip)** uses WebGPU (about 330 MB download) on devices that support it; it falls back to Standard automatically.
+`coi-sw.js` is a tiny service worker that enables multi-threading (one automatic reload on first visit).
+
+## Other features
+
+- Time left: header shows time left in the current section and in the book; Contents shows each heading's length; Library shows time left per book. The speaking rate is learned from what is actually played.
+- Code blocks are read aloud (symbols spoken as words, comments announced); turn off in Settings → Read code aloud.

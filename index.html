@@ -4,6 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Book Reader</title>
+<script>
+/* Turn on multi-threading for the natural voice (see coi-sw.js). One automatic reload the first time. */
+(function () {
+  try {
+    if (window.crossOriginIsolated || !window.isSecureContext || !('serviceWorker' in navigator)) return;
+    var reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (reloaded || sessionStorage.getItem('coiReloaded')) return;
+      reloaded = true; sessionStorage.setItem('coiReloaded', '1'); location.reload();
+    });
+    navigator.serviceWorker.register('coi-sw.js').catch(function () {});
+  } catch (e) {}
+})();
+</script>
+
 <link rel="stylesheet" href="vendor/katex/katex.min.css">
 <style>
 :root { --bg:#14161a; --panel:#1d2026; --ink:#e6e3da; --dim:#8b909a; --accent:#e7c35a; --hl:rgba(231,195,90,.22); --line:#2a2e36; --fs:19px; }
@@ -18,6 +33,7 @@ header .top { display:flex; align-items:center; gap:8px; }
 header .grow { flex:1; }
 header .sub { display:flex; align-items:baseline; gap:10px; margin-top:6px; }
 header .title { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; font-size:14px; }
+header .times { color:var(--dim); font-size:12px; margin-top:2px; }
 header .prog { color:var(--dim); font-size:13px; white-space:nowrap; }
 .toc { display:block; width:100%; text-align:left; background:none; border:0; border-bottom:1px solid var(--line); border-radius:0; padding:10px 6px; }
 .toc.cur { color:var(--accent); font-weight:600; }
@@ -37,6 +53,11 @@ body.wrap #content pre { white-space:pre-wrap; word-break:break-word; }
 .s { cursor:pointer; border-radius:4px; transition:background .15s; -webkit-box-decoration-break:clone; box-decoration-break:clone; }
 .s.active { background:var(--hl); }
 .mathblock { padding:4px 0; margin:.4em 0; overflow-x:auto; overflow-y:hidden; }
+.codeblock { margin:.9em 0; }
+.codehead { display:inline-block; font:600 11px ui-sans-serif,system-ui,sans-serif; letter-spacing:.04em; text-transform:uppercase; color:var(--dim); padding:2px 8px; border:1px solid var(--line); border-bottom:0; border-radius:6px 6px 0 0; background:var(--panel); }
+#content pre.code { margin:0; border-top-left-radius:0; font-size:.84em; line-height:1.55; }
+.codeline { display:block; white-space:pre; }
+body.wrap .codeline { white-space:pre-wrap; word-break:break-word; }
 .katex { font-size:1.08em; }
 .mj { display:inline-block; min-width:1.2em; }
 .mathblock .mj { display:block; min-height:2.6em; }
@@ -55,6 +76,7 @@ dialog::backdrop { background:rgba(0,0,0,.6); }
 .book.cur { border-color:var(--accent); } .book .nm { flex:1; min-width:0; } .book .nm b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .book .meter { height:4px; background:var(--line); border-radius:2px; margin-top:6px; } .book .meter i { display:block; height:100%; background:var(--accent); border-radius:2px; }
 .book small { color:var(--dim); } .book .x { padding:4px 10px; color:var(--dim); }
+#testOut { display:none; white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px; line-height:1.5; margin:0; }
 textarea, input[type=text] { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px; }
 textarea { min-height:90px; resize:vertical; }
 input[type=range] { width:100%; }
@@ -70,6 +92,7 @@ input[type=range] { width:100%; }
     <button id="btnSet" aria-label="Settings">&#9881;</button>
   </div>
   <div class="sub"><div class="title" id="title">Book Reader</div><div class="prog" id="prog"></div></div>
+  <div class="times" id="times"></div>
 </header>
 <div id="bar"><div id="barfill"></div></div>
 <main id="main"><div id="content"></div></main>
@@ -103,10 +126,14 @@ input[type=range] { width:100%; }
   <h2>Settings <button id="closeSet">Close</button></h2>
   <div class="row"><label>Voice engine</label>
     <select id="engine"><option value="kokoro">Natural (Kokoro, free)</option><option value="device">This device's voice</option></select></div>
+  <div class="row" id="rowKMode"><label>Natural voice mode</label><select id="kmode"><option value="wasm">Standard (90 MB)</option><option value="gpu">Fast – graphics chip (330 MB)</option></select></div>
   <div class="row" id="rowKVoice"><label>Natural voice</label><select id="kvoice"></select></div>
   <div class="row" id="rowDVoice"><label>Device voice</label><select id="dvoice"></select></div>
   <div class="row"><label>Text size</label><input type="range" id="fs" min="14" max="30" step="1" style="width:55%"></div>
+  <div class="row"><label>Read code aloud</label><input type="checkbox" id="readCode"></div>
   <div class="row"><label>Wrap long code lines</label><input type="checkbox" id="wrap"></div>
+  <div class="row"><label>Check the natural voice</label><button id="btnTest">Test voice</button></div>
+  <pre id="testOut"></pre>
   <div class="hint">Natural voice downloads a ~90&nbsp;MB model once (first time you press play), then works offline. Tap any sentence to jump there.</div>
 </div></dialog>
 
