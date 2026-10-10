@@ -20,3 +20,5 @@ Settings → **Natural voice mode → Fast (graphics chip)** uses WebGPU (about 
 
 - Time left: header shows time left in the current section and in the book; Contents shows each heading's length; Library shows time left per book. The speaking rate is learned from what is actually played.
 - Code blocks are read aloud (symbols spoken as words, comments announced); turn off in Settings → Read code aloud.
+- Math is read from the structure of the formula (not symbol by symbol): `f(x)` is "f of x", `P(A | B)` is "P of A given B", `{x : x > 0}` is "the set of x such that x is greater than 0", `\frac12` is "one half", `dy/dx` is "d y by d x", brackets only become "the quantity ..." when it matters.
+- LaTeX files: `\newcommand`, `\def` and `\DeclareMathOperator` shortcuts are expanded; theorem/proof environments, figure and table captions, footnotes, links, lists and verbatim code are handled; equations are never mangled by the text clean-up.
