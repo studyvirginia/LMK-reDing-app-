@@ -1,0 +1,1 @@
+{"model_type": "style_text_to_speech_2", "n_token": 178, "style_dim": 128, "hidden_dim": 512, "n_layer": 3, "max_dur": 50, "n_mels": 80, "dim_in": 64, "dropout": 0.2, "text_encoder_kernel_size": 5, "max_conv_dim": 512, "multispeaker": true, "transformers.js_config": {"dtype": "fp32"}}
