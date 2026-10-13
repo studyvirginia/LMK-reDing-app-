@@ -7,9 +7,9 @@ const $ = id => document.getElementById(id);
 const Core = window.BookCore;
 
 /* ---------- settings (localStorage, per-device conveniences) ---------- */
-const DEFAULTS = { engine: 'kokoro', kmode: 'wasm', kvoice: 'af_heart', dvoice: '', speed: 1, fs: 19, wrap: false, readCode: true, cps: { kokoro: 14, device: 14 }, cur: '' };
+const DEFAULTS = { engine: 'kokoro', kmode: 'wasm', kvoice: 'af_heart', dvoice: '', speed: 1, fs: 19, wrap: false, mathMode: 'read', codeMode: 'read', cps: { kokoro: 14, piper: 14, device: 14 }, cur: '' };
 let settings = Object.assign({}, DEFAULTS);
-try { Object.assign(settings, JSON.parse(localStorage.getItem('br.settings') || '{}')); } catch (e) {}
+try { const saved = JSON.parse(localStorage.getItem('br.settings') || '{}'); Object.assign(settings, saved); if (saved.readCode === false && !saved.codeMode) settings.codeMode = 'skip'; delete settings.readCode; } catch (e) {}
 const saveSettings = () => { try { localStorage.setItem('br.settings', JSON.stringify(settings)); } catch (e) {} };
 
 /* ---------- storage (IndexedDB; falls back to memory) ----------
@@ -51,6 +51,15 @@ function status(msg, ms) {
   if (ms) statusTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
 }
 $('status').onclick = () => status(null);
+// notices (a backup voice took over, something is slow...) have their own spot so progress messages never hide them
+let noticeTimer = 0;
+function notify(msg, ms) {
+  const el = $('notice'); clearTimeout(noticeTimer);
+  if (!msg) { el.style.display = 'none'; return; }
+  el.textContent = msg; el.style.display = 'block';
+  noticeTimer = setTimeout(() => { el.style.display = 'none'; }, ms || 30000);
+}
+$('notice').onclick = () => notify(null);
 
 /* ---------- state ---------- */
 let books = [];
@@ -74,7 +83,7 @@ function renderMath(tex, display) {
   catch (e) { return Core.esc(tex); }
 }
 marked.setOptions({ gfm: true, breaks: false });
-const env = () => ({ lazyMath: true, readCode: settings.readCode, renderMath, parseInline: s => marked.parseInline(s), parseBlock: s => marked.parse(s) });
+const env = () => ({ lazyMath: true, mathMode: settings.mathMode, codeMode: settings.codeMode, renderMath, parseInline: s => marked.parseInline(s), parseBlock: s => marked.parse(s) });
 const looksTex = (b, text) => b.type === 'tex' || /\\documentclass|\\begin\{document\}/.test(text.slice(0, 20000));
 
 function ensureData(c) { // turn the raw text of a chunk into sentences + html (no DOM work)
@@ -147,12 +156,12 @@ const firstPos = c => { const p = stepPos(Math.max(0, c), -1, 1); return p || st
 
 /* ---------- time remaining ---------- */
 // speech speed (characters of spoken text per second at 1x) is learned from what is actually played, per voice engine
-const rateKey = () => (settings.engine === 'kokoro' && !forceDevice ? 'kokoro' : 'device');
+const rateKey = () => (curBackend ? (curBackend.id === 'piper' ? 'piper' : 'kokoro') : (pickBackend() ? (pickBackend().id === 'piper' ? 'piper' : 'kokoro') : 'device'));
 const cpsNow = () => (settings.cps && settings.cps[rateKey()]) || 14;
 function learnRate(key, chars, secs) {
   if (!(chars > 15 && secs > 0.5)) return;
   const sample = Math.max(6, Math.min(30, chars / secs));
-  if (!settings.cps) settings.cps = { kokoro: 14, device: 14 };
+  if (!settings.cps) settings.cps = { kokoro: 14, piper: 14, device: 14 };
   settings.cps[key] = settings.cps[key] * 0.85 + sample * 0.15; saveSettings();
 }
 const speechRatio = () => (builtSrc > 300 ? builtSpeech / builtSrc : 0.8);
@@ -259,63 +268,25 @@ function savePos() {
 }
 window.addEventListener('pagehide', () => { if (book) { book.pos = { c: cc, u: ci }; store.put(metaOf(book)); } });
 
-/* ---------- natural voice (Kokoro, runs in the browser) ---------- */
+/* ---------- speech engines ----------
+   Natural voices run in background workers so generating speech never freezes the page. Several engines
+   back each other up, in this order: Kokoro (best quality) -> Kokoro on the page itself -> Piper (smaller and
+   much faster) -> the device's own voice. If one fails or is too slow, the next one takes over automatically. */
 const KVOICES = [['af_heart', 'Heart (US female)'], ['af_bella', 'Bella (US female)'], ['af_nicole', 'Nicole (US female)'], ['af_sarah', 'Sarah (US female)'],
   ['am_michael', 'Michael (US male)'], ['am_fenrir', 'Fenrir (US male)'], ['am_adam', 'Adam (US male)'],
   ['bf_emma', 'Emma (UK female)'], ['bf_isabella', 'Isabella (UK female)'], ['bm_george', 'George (UK male)'], ['bm_lewis', 'Lewis (UK male)']];
+const MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+const PIPER_VOICE = 'en-us-lessac-medium';
+const SAMPLE = 'This is a test of the natural voice. If you can hear this clearly, everything works.';
+const abs = p => new URL(p, location.href).href;
 let synthChain = Promise.resolve();
 const audioCache = new Map();
 let keep = new Set();
-const akey = (c, i) => book.id + '|' + settings.kvoice + '|' + c + '|' + i;
+let curBackend = null; // the engine used for the sentence being prepared (null = the device's own voice)
+const akey = (c, i) => book.id + '|' + (curBackend ? curBackend.id + ':' + curBackend.voice() : 'device') + '|' + c + '|' + i;
 function cacheClear() { audioCache.forEach(p => p.then(u => u.forEach(URL.revokeObjectURL)).catch(() => {})); audioCache.clear(); keep = new Set(); }
+const newStats = () => ({ audioSec: 0, genSec: 0, n: 0 });
 
-/* The voice model runs in a background worker (tts-worker.js): generating speech takes seconds of
-   heavy computing and would otherwise freeze scrolling and buttons. */
-const MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';
-let ttsWorker = null, ttsReady = null, ttsSeq = 0;
-const ttsPending = new Map();
-const ttsStats = { audioSec: 0, genSec: 0, n: 0, loadSec: 0 };
-function failPending(err) { ttsPending.forEach(p => p.rej(err)); ttsPending.clear(); }
-let ttsMode = null;
-let forceStandard = false; // fast (GPU) mode failed on this device: use the standard natural voice until mode is changed
-const wantMode = () => (forceStandard ? 'wasm' : settings.kmode);
-function resetVoice() {
-  if (ttsWorker) { try { ttsWorker.terminate(); } catch (e) {} }
-  ttsWorker = null; ttsReady = null; failPending(new Error('voice restarted'));
-}
-function ensureVoice() {
-  const mode = wantMode();
-  if (ttsReady && ttsMode !== mode) resetVoice();
-  if (ttsReady) return ttsReady;
-  ttsMode = mode;
-  ttsReady = new Promise((res, rej) => {
-    const t0 = performance.now();
-    status('Loading natural voice (first time ≈ ' + (mode === 'gpu' ? '330' : '90') + ' MB)…');
-    let w;
-    try { w = new Worker('tts-worker.js', { type: 'module' }); } catch (e) { return rej(new Error('this browser cannot run the voice in the background (' + errText(e) + ')')); }
-    ttsWorker = w;
-    w.onmessage = ev => {
-      const m = ev.data;
-      if (m.type === 'progress') { if (/\.onnx$/.test(m.file || '')) status('Downloading voice… ' + Math.round(m.progress || 0) + '%'); }
-      else if (m.type === 'ready') { ttsStats.loadSec = (performance.now() - t0) / 1000; status(null); res(true); }
-      else if (m.type === 'initerror') rej(Object.assign(new Error(m.message), { name: m.name || 'Error' }));
-      else if (m.type === 'audio' || m.type === 'error') {
-        const p = ttsPending.get(m.id); if (!p) return; ttsPending.delete(m.id);
-        if (m.type === 'audio') p.res(m); else p.rej(Object.assign(new Error(m.message), { name: m.name || 'Error' }));
-      }
-    };
-    w.onerror = ev => {
-      const err = new Error('the voice worker crashed' + (ev && ev.message ? ': ' + ev.message : ' (it may have run out of memory or failed to load)'));
-      failPending(err); rej(err); ttsReady = null; ttsWorker = null;
-    };
-    w.postMessage({ type: 'init', model: MODEL_ID, wasmPaths: new URL('vendor/ort/', location.href).href, device: mode === 'gpu' ? 'webgpu' : 'wasm', dtype: mode === 'gpu' ? 'fp32' : 'q8' });
-  });
-  ttsReady.catch(() => { ttsReady = null; if (ttsWorker) { try { ttsWorker.terminate(); } catch (e) {} ttsWorker = null; } failPending(new Error('voice not available')); });
-  return ttsReady;
-}
-function ttsGenerate(text, voice) {
-  return new Promise((res, rej) => { const id = ++ttsSeq; ttsPending.set(id, { res, rej }); ttsWorker.postMessage({ type: 'gen', id, text, voice }); });
-}
 function wavBlob(f32, rate) {
   const n = f32.length, b = new DataView(new ArrayBuffer(44 + n * 2));
   const w = (o, s) => { for (let k = 0; k < s.length; k++) b.setUint8(o + k, s.charCodeAt(k)); };
@@ -324,16 +295,134 @@ function wavBlob(f32, rate) {
   for (let k = 0; k < n; k++) b.setInt16(44 + k * 2, Math.max(-1, Math.min(1, f32[k])) * 32767, true);
   return new Blob([b], { type: 'audio/wav' });
 }
-function synth(c, i) {
+
+// An engine that runs in its own worker. spec: id, label, rank (higher = faster), url, voice(), size(), init()
+function workerBackend(spec) {
+  const be = { id: spec.id, label: spec.label, rank: spec.rank, voice: spec.voice, stats: newStats(), loadSec: 0, source: '', worker: null, readyP: null };
+  const pending = new Map(); let seq = 0;
+  const failAll = err => { pending.forEach(p => p.rej(err)); pending.clear(); };
+  be.dispose = () => { if (be.worker) { try { be.worker.terminate(); } catch (e) {} } be.worker = null; be.readyP = null; failAll(new Error(be.label + ' stopped')); };
+  be.ready = () => {
+    if (be.readyP) return be.readyP;
+    const p = new Promise((res, rej) => {
+      const t0 = performance.now();
+      status('Loading ' + be.label + ' (first time ≈ ' + spec.size() + ')…');
+      let w;
+      try { w = new Worker(spec.url, { type: 'module' }); }
+      catch (e) { return rej(Object.assign(new Error('this browser cannot run the voice in the background (' + errText(e) + ')'), { kind: 'worker' })); }
+      be.worker = w;
+      w.onmessage = ev => {
+        const m = ev.data;
+        if (m.type === 'progress') { if (/model|\.onnx$/.test(m.file || '')) status('Downloading ' + be.label + '… ' + Math.round(m.progress || 0) + '%'); }
+        else if (m.type === 'source') be.source = m.from;
+        else if (m.type === 'ready') { be.loadSec = (performance.now() - t0) / 1000; status(null); res(true); }
+        else if (m.type === 'initerror') rej(Object.assign(new Error(m.message), { name: m.name || 'Error' }));
+        else if (m.type === 'audio' || m.type === 'error') {
+          const q = pending.get(m.id); if (!q) return; pending.delete(m.id);
+          if (m.type === 'audio') q.res(m); else q.rej(Object.assign(new Error(m.message), { name: m.name || 'Error' }));
+        }
+      };
+      w.onerror = ev => {
+        const err = Object.assign(new Error('the ' + be.label + ' worker crashed' + (ev && ev.message ? ': ' + ev.message : ' (it may have run out of memory or failed to load)')), { kind: 'worker' });
+        failAll(err); rej(err); be.worker = null; be.readyP = null;
+      };
+      w.postMessage(Object.assign({ type: 'init', base: abs('./') }, spec.init()));
+    });
+    be.readyP = p;
+    p.catch(() => { if (be.readyP === p) be.dispose(); });
+    return p;
+  };
+  be.gen = (text, voice) => new Promise((res, rej) => {
+    if (!be.worker) return rej(new Error(be.label + ' is not running'));
+    const id = ++seq; pending.set(id, { res, rej }); be.worker.postMessage({ type: 'gen', id, text, voice });
+  });
+  return be;
+}
+
+// Kokoro on the page itself: used only if background workers do not work in this browser
+function mainKokoroBackend() {
+  const be = { id: 'kokoroMain', label: 'Natural voice (Kokoro, on this page)', rank: 1, voice: () => settings.kvoice, stats: newStats(), loadSec: 0, source: '', tts: null, readyP: null };
+  be.dispose = () => { be.tts = null; be.readyP = null; };
+  be.ready = () => {
+    if (be.readyP) return be.readyP;
+    const p = (async () => {
+      const t0 = performance.now();
+      status('Loading ' + be.label + ' (first time ≈ 90 MB)…');
+      const [mod, host] = await Promise.all([import('./vendor/kokoro/kokoro.web.js'), import('./modelhost.js')]);
+      mod.env.wasmPaths = abs('vendor/ort/');
+      host.installModelRedirect(abs('./'), (f, from) => { if (/\.onnx$/.test(f)) be.source = from; });
+      be.tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
+        dtype: 'q8', device: 'wasm',
+        progress_callback: pr => { if (pr && pr.status === 'progress' && /\.onnx$/.test(pr.file || '')) status('Downloading ' + be.label + '… ' + Math.round(pr.progress || 0) + '%'); }
+      });
+      be.loadSec = (performance.now() - t0) / 1000; status(null); return true;
+    })();
+    be.readyP = p; p.catch(() => { if (be.readyP === p) be.dispose(); });
+    return p;
+  };
+  be.gen = async (text, voice) => {
+    await new Promise(r => setTimeout(r, 0)); // let the page breathe: this runs on the page itself
+    const t0 = performance.now(); const a = await be.tts.generate(text, { voice, speed: 1 });
+    return { audio: a.audio, rate: a.sampling_rate, ms: performance.now() - t0 };
+  };
+  return be;
+}
+
+let forceStandard = false; // fast (GPU) mode failed on this device: use the standard Kokoro until the mode is changed
+const kokoroMode = () => (forceStandard ? 'wasm' : settings.kmode);
+let kokoroStartedAs = null;
+const backends = {
+  kokoro: workerBackend({
+    id: 'kokoro', label: 'Natural voice (Kokoro)', rank: 1, url: 'tts-worker.js', voice: () => settings.kvoice,
+    size: () => (kokoroMode() === 'gpu' ? '330' : '90') + ' MB',
+    init: () => ({ model: MODEL_ID, wasmPaths: abs('vendor/ort/'), device: kokoroMode() === 'gpu' ? 'webgpu' : 'wasm', dtype: kokoroMode() === 'gpu' ? 'fp32' : 'q8' })
+  }),
+  kokoroMain: mainKokoroBackend(),
+  piper: workerBackend({
+    id: 'piper', label: 'Fast natural voice (Piper)', rank: 3, url: 'piper-worker.js', voice: () => PIPER_VOICE,
+    size: () => '65 MB', init: () => ({ voice: PIPER_VOICE })
+  })
+};
+{ // starting Kokoro in a different mode (standard / graphics chip) needs a fresh worker
+  const ready0 = backends.kokoro.ready;
+  backends.kokoro.ready = () => { const m = kokoroMode(); if (backends.kokoro.readyP && kokoroStartedAs !== m) backends.kokoro.dispose(); kokoroStartedAs = m; return ready0(); };
+}
+
+const CHAINS = { kokoro: ['kokoro', 'kokoroMain', 'piper'], piper: ['piper', 'kokoro', 'kokoroMain'], device: [] };
+const failed = {}; // engine id -> { at, why }: skipped for two minutes, then tried again
+const usable = id => !failed[id] || Date.now() - failed[id].at > 120000;
+function pickBackend() {
+  let ids = (CHAINS[settings.engine] || []).filter(usable);
+  const slow = settings.slow && settings.slow.kokoro; // Kokoro measured too slow on this device at this speed: start with the faster one
+  if (settings.engine === 'kokoro' && slow && slow < settings.speed * 0.85 && ids.includes('piper')) ids = ['piper'].concat(ids.filter(x => x !== 'piper'));
+  return ids.length ? backends[ids[0]] : null;
+}
+function failBackend(be, what, e) {
+  console.error(be.id, what, e);
+  failed[be.id] = { at: Date.now(), why: errText(e) };
+  // Kokoro on the page only helps when the *worker* was the problem, not the model or the network
+  if (be.id === 'kokoro' && !(e && e.kind === 'worker')) failed.kokoroMain = { at: Date.now(), why: 'same problem as ' + be.label };
+  be.dispose();
+  const next = pickBackend();
+  notify(be.label + ' ' + what + ' (' + errText(e) + '). ' + (next ? 'Switched to ' + next.label + '.' : 'Using the device voice.') + ' Tap here to dismiss.');
+  showActive();
+}
+function showActive() {
+  const el = $('activeVoice'); if (!el) return;
+  const be = curBackend || pickBackend();
+  el.textContent = 'Voice in use: ' + (be ? be.label + (be.source ? ' · model from ' + be.source : '') : 'this device’s own voice') + (Object.keys(failed).filter(k => !usable(k)).length ? ' · backups engaged' : '');
+}
+
+function synth(be, c, i) {
   const key = akey(c, i);
   if (audioCache.has(key)) return audioCache.get(key);
-  const text = chunks[c].units[i].speak, voice = settings.kvoice;
+  const text = Core.forEngine(chunks[c].units[i].speak, 'espeak'), voice = be.voice();
   const p = synthChain.catch(() => {}).then(async () => {
     const urls = []; urls.dur = 0;
     for (const chunk of Core.chunkForTTS(text)) {
-      const r = await ttsGenerate(chunk, voice);
+      const r = await be.gen(chunk, voice);
       const dur = r.audio.length / r.rate;
-      ttsStats.audioSec += dur; ttsStats.genSec += r.ms / 1000; ttsStats.n++; urls.dur += dur;
+      be.stats.audioSec += dur; be.stats.genSec += r.ms / 1000; be.stats.n++; urls.dur += dur;
       urls.push(URL.createObjectURL(wavBlob(r.audio, r.rate)));
     }
     return urls;
@@ -366,14 +455,27 @@ async function playUrls(urls, token) {
   }
 }
 
-/* ---------- device voice (Web Speech API) ---------- */
+/* ---------- device voice (Web Speech API): the last backup ---------- */
+function bestDeviceVoice() { // prefers "natural"/"neural"/premium voices in the reader's language
+  if (!('speechSynthesis' in window)) return null;
+  const vs = speechSynthesis.getVoices(); if (!vs.length) return null;
+  if (settings.dvoice) { const v = vs.find(x => x.voiceURI === settings.dvoice); if (v) return v; }
+  const lang = (navigator.language || 'en-US').toLowerCase();
+  const score = v => {
+    const n = v.name.toLowerCase(), l = v.lang.toLowerCase().replace('_', '-'); let s = 0;
+    if (l === lang) s += 6; else if (l.slice(0, 2) === lang.slice(0, 2)) s += 4;
+    if (/natural|neural/.test(n)) s += 8; if (/premium|enhanced/.test(n)) s += 6; if (/siri/.test(n)) s += 4; if (/online/.test(n)) s += 3; if (/google/.test(n)) s += 2;
+    return s + (v.default ? 1 : 0);
+  };
+  return vs.slice().sort((x, y) => score(y) - score(x))[0];
+}
 function speakDevice(text, token) {
   return new Promise(res => {
     if (!('speechSynthesis' in window)) { status('This browser has no built-in voice.', 4000); return res(); }
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
+    const u = new SpeechSynthesisUtterance(Core.forEngine(text, 'device'));
     u.rate = Math.min(settings.speed, 3);
-    const v = speechSynthesis.getVoices().find(x => x.voiceURI === settings.dvoice);
+    const v = bestDeviceVoice();
     if (v) { u.voice = v; u.lang = v.lang; }
     u.onend = u.onerror = () => res();
     if (token === playToken) speechSynthesis.speak(u); else res();
@@ -382,7 +484,6 @@ function speakDevice(text, token) {
 
 /* ---------- playback loop ---------- */
 let slowWarned = false;
-let forceDevice = false; // set when the natural voice fails; lasts until the page reloads, never saved
 function windowAround() { // sentences to keep audio for: 2 behind, 3 ahead
   const fwd = [], back = [];
   let p = [cc, ci];
@@ -395,43 +496,48 @@ async function run(token) {
   while (token === playToken) {
     mark();
     const c = cc, i = ci;
+    const be = curBackend = pickBackend();
+    showActive();
     try {
-      if (settings.engine === 'kokoro' && !forceDevice) {
-        try { await ensureVoice(); }
+      if (be) {
+        try { await be.ready(); }
         catch (e) {
-          console.error(e);
-          if (wantMode() === 'gpu') { status('Fast mode is not available on this device (' + errText(e) + '). Using the standard natural voice instead.', 6000); forceStandard = true; continue; }
-          status('Natural voice could not load (' + errText(e) + '). Using the device voice for now. Tap here to dismiss.');
-          forceDevice = true;
-          continue;
+          if (token !== playToken) return;
+          if (be.id === 'kokoro' && kokoroMode() === 'gpu') { console.error(e); be.dispose(); forceStandard = true; notify('Fast mode is not available on this device (' + errText(e) + '). Using the standard natural voice instead.', 12000); continue; }
+          failBackend(be, 'could not start', e); continue;
         }
+        if (token !== playToken) return;
         const w = windowAround();
         keep = new Set([akey(c, i)].concat(w.fwd.map(p => akey(p[0], p[1])), w.back.map(p => akey(p[0], p[1]))));
-        const mine = synth(c, i);
-        w.fwd.forEach(p => synth(p[0], p[1]));
+        const mine = synth(be, c, i);
+        w.fwd.forEach(p => synth(be, p[0], p[1]));
         status('Preparing voice…');
         let urls;
         try { urls = await mine; }
-        catch (e) {
-          console.error(e);
-          status('Natural voice failed while speaking (' + errText(e) + '). Using the device voice for now. Tap here to dismiss.');
-          forceDevice = true;
-          continue;
-        }
+        catch (e) { if (token !== playToken) return; failBackend(be, 'failed while speaking', e); continue; }
         status(null);
         if (token !== playToken) return;
-        if (!slowWarned && ttsStats.n >= 3 && ttsStats.audioSec / ttsStats.genSec < settings.speed * 0.9) {
-          slowWarned = true;
-          status('The natural voice is making speech at ' + (ttsStats.audioSec / ttsStats.genSec).toFixed(1) + '× real time on this device, slower than playback, so you will hear pauses. In Settings you can try the Fast mode, lower the speed, or use the device voice. Tap to dismiss.');
+        // too slow for the chosen speed? move to a faster engine if there is one, otherwise just say so once
+        const rtf = be.stats.genSec ? be.stats.audioSec / be.stats.genSec : 99;
+        if (be.stats.n >= 3 && rtf < settings.speed * 0.85) {
+          const faster = (CHAINS[settings.engine] || []).map(id => backends[id]).find(b => b.rank > be.rank && usable(b.id));
+          if (faster) {
+            settings.slow = Object.assign({}, settings.slow, { [be.id === 'piper' ? 'piper' : 'kokoro']: rtf }); saveSettings();
+            failed[be.id] = { at: Date.now(), why: 'too slow' }; be.dispose(); cacheClear();
+            notify(be.label + ' is making speech at only ' + rtf.toFixed(1) + '× real time on this device, too slow for ' + settings.speed + '× playback. Switched to ' + faster.label + '. Tap here to dismiss.');
+            showActive(); continue;
+          }
+          if (!slowWarned) {
+            slowWarned = true;
+            notify('The natural voice is making speech at ' + rtf.toFixed(1) + '× real time on this device, slower than playback, so you will hear pauses. In Settings you can lower the speed, try Fast mode, or use the device voice. Tap to dismiss.');
+          }
         }
-        try { await playUrls(urls, token); if (token === playToken && urls.dur) learnRate('kokoro', chunks[c].units[i].speak.length, urls.dur); }
+        try { await playUrls(urls, token); if (token === playToken && urls.dur) learnRate(be.id === 'piper' ? 'piper' : 'kokoro', chunks[c].units[i].speak.length, urls.dur); }
         catch (e) {
           if (token !== playToken) return;
           console.error(e);
           if (e && e.name === 'NotAllowedError') { status('Your browser blocked the audio. Tap ▶ again.'); playing = false; syncPlay(); return; }
-          status('Audio playback failed (' + errText(e) + '). Using the device voice for now. Tap here to dismiss.');
-          forceDevice = true;
-          continue;
+          failBackend(be, 'produced audio this browser could not play', e); continue;
         }
       } else {
         const tDev = performance.now();
@@ -450,7 +556,6 @@ function start(c, i) {
   if (!chunks.length) return;
   unlockAudio(); // must happen synchronously inside the tap
   stop(true);
-  forceDevice = false; // retry the natural voice on every fresh play
   if (c != null) { cc = c; ci = i; }
   playing = true; syncPlay(); savePos();
   run(++playToken);
@@ -607,8 +712,8 @@ function syncSettingsUI() {
   $('engine').value = settings.engine;
   $('rowKVoice').style.display = settings.engine === 'kokoro' ? '' : 'none';
   $('rowKMode').style.display = settings.engine === 'kokoro' ? '' : 'none';
-  $('rowDVoice').style.display = settings.engine === 'device' ? '' : 'none';
-  $('kvoice').value = settings.kvoice; $('kmode').value = settings.kmode; $('fs').value = settings.fs; $('wrap').checked = settings.wrap; $('readCode').checked = settings.readCode; $('speed').value = String(settings.speed);
+  showActive();
+  $('kvoice').value = settings.kvoice; $('kmode').value = settings.kmode; $('fs').value = settings.fs; $('wrap').checked = settings.wrap; $('mathMode').value = settings.mathMode; $('codeMode').value = settings.codeMode; $('speed').value = String(settings.speed);
   document.documentElement.style.setProperty('--fs', settings.fs + 'px');
   document.body.classList.toggle('wrap', settings.wrap);
 }
@@ -618,52 +723,88 @@ function fillSelects() {
   const fillDev = () => {
     if (!('speechSynthesis' in window)) return;
     const vs = speechSynthesis.getVoices();
-    $('dvoice').innerHTML = vs.map(v => '<option value="' + Core.esc(v.voiceURI) + '">' + Core.esc(v.name + ' (' + v.lang + ')') + '</option>').join('');
+    $('dvoice').innerHTML = '<option value="">Automatic (best available)</option>' + vs.map(v => '<option value="' + Core.esc(v.voiceURI) + '">' + Core.esc((/natural|neural|premium|enhanced|siri/i.test(v.name) ? '★ ' : '') + v.name + ' (' + v.lang + ')') + '</option>').join('');
     if (settings.dvoice) $('dvoice').value = settings.dvoice;
   };
   fillDev(); if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = fillDev;
 }
 const restartIfPlaying = () => { if (playing) start(cc, ci); };
-$('engine').onchange = e => { settings.engine = e.target.value; saveSettings(); syncSettingsUI(); restartIfPlaying(); };
+$('engine').onchange = e => { settings.engine = e.target.value; delete settings.slow; Object.keys(failed).forEach(k => delete failed[k]); slowWarned = false; saveSettings(); cacheClear(); syncSettingsUI(); restartIfPlaying(); };
 $('kvoice').onchange = e => { settings.kvoice = e.target.value; saveSettings(); cacheClear(); restartIfPlaying(); };
-$('kmode').onchange = e => { settings.kmode = e.target.value; saveSettings(); forceStandard = false; slowWarned = false; ttsStats.audioSec = ttsStats.genSec = ttsStats.n = 0; restartIfPlaying(); };
+$('kmode').onchange = e => { settings.kmode = e.target.value; delete settings.slow; delete failed.kokoro; saveSettings(); forceStandard = false; slowWarned = false; backends.kokoro.stats = newStats(); restartIfPlaying(); };
 $('dvoice').onchange = e => { settings.dvoice = e.target.value; saveSettings(); restartIfPlaying(); };
-$('speed').onchange = e => { settings.speed = +e.target.value; saveSettings(); updateTimes(); player.playbackRate = settings.speed; if (playing && (settings.engine === 'device' || forceDevice)) restartIfPlaying(); };
+$('speed').onchange = e => { settings.speed = +e.target.value; saveSettings(); updateTimes(); player.playbackRate = settings.speed; if (playing && !curBackend) restartIfPlaying(); };
 $('fs').oninput = e => { settings.fs = +e.target.value; saveSettings(); syncSettingsUI(); };
-$('readCode').onchange = e => { settings.readCode = e.target.checked; saveSettings(); if (book) { stop(); builtSrc = builtSpeech = 0; openBook(book); } };
+const modeChanged = () => { saveSettings(); if (book) { stop(); builtSrc = builtSpeech = 0; openBook(book); } }; // sentences change, so the book is rebuilt
+$('mathMode').onchange = e => { settings.mathMode = e.target.value; modeChanged(); };
+$('codeMode').onchange = e => { settings.codeMode = e.target.value; modeChanged(); };
 $('wrap').onchange = e => { settings.wrap = e.target.checked; saveSettings(); syncSettingsUI(); };
 
 
-/* ---------- "Test voice": shows exactly which step works or fails ---------- */
-async function testVoice() {
-  const out = $('testOut'); out.style.display = 'block'; out.textContent = '';
-  const log = s => { out.textContent += s + '\n'; };
-  log('Browser: ' + (navigator.userAgent.match(/(Chrome|Firefox|Version|Safari)\/[\d.]+/g) || []).slice(0, 2).join(' '));
-  log('Secure page: ' + window.isSecureContext + ' | threads allowed: ' + !!window.crossOriginIsolated + ' | cores: ' + (navigator.hardwareConcurrency || '?') + ' | memory: ' + (navigator.deviceMemory ? navigator.deviceMemory + ' GB' : '?'));
-  log('Background worker: ' + (typeof Worker !== 'undefined') + ' | WebAssembly: ' + (typeof WebAssembly !== 'undefined') + ' | graphics chip (WebGPU): ' + !!navigator.gpu);
-  log('Mode: ' + (wantMode() === 'gpu' ? 'Fast (graphics chip)' : 'Standard'));
-  if (ttsReady) log('Voice model: already loaded'); else log('1. Loading voice (first time downloads ≈ ' + (wantMode() === 'gpu' ? '330' : '90') + ' MB; wait for it)…');
+/* ---------- voice tests: show exactly which engines work, from where they load, and how fast they are ---------- */
+const rtfWord = r => (r >= 2 ? 'fast enough for any speed' : r >= 1.1 ? 'fine at normal speed' : 'slower than real time (expect pauses)');
+async function testBackend(be, log, play) {
+  log('— ' + be.label);
   const t0 = performance.now();
-  try { await ensureVoice(); } catch (e) { log('FAILED at step 1 (loading the voice): ' + errText(e)); return; }
-  if (!ttsStats.loadSec || performance.now() - t0 > 500) log('   loaded in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s');
-  log('2. Generating a sample sentence…');
+  try { await be.ready(); } catch (e) { log('  FAILED to load: ' + errText(e)); return { ok: false }; }
+  log('  loaded in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s' + (be.source ? ' · model from ' + be.source : ''));
   let r;
-  try { r = await ttsGenerate('This is a test of the natural voice. If you can hear this clearly, everything works.', settings.kvoice); }
-  catch (e) { log('FAILED at step 2 (generating speech): ' + errText(e)); return; }
+  try { r = await be.gen(SAMPLE, be.voice()); } catch (e) { log('  FAILED to make speech: ' + errText(e)); return { ok: false }; }
   const dur = r.audio.length / r.rate, secs = r.ms / 1000, rtf = dur / secs;
   let peak = 0; for (let k = 0; k < r.audio.length; k += 7) peak = Math.max(peak, Math.abs(r.audio[k]));
-  log('   ' + dur.toFixed(1) + ' s of speech made in ' + secs.toFixed(1) + ' s (' + rtf.toFixed(1) + '× real time), loudest sample ' + peak.toFixed(2));
-  if (peak < 0.01) { log('FAILED: the generated audio is silent.'); return; }
-  log('3. Playing it…');
+  log('  ' + dur.toFixed(1) + ' s of speech made in ' + secs.toFixed(1) + ' s = ' + rtf.toFixed(1) + '× real time (' + rtfWord(rtf) + '), loudest sample ' + peak.toFixed(2));
+  if (peak < 0.01) { log('  FAILED: the audio is silent'); return { ok: false }; }
   const url = URL.createObjectURL(wavBlob(r.audio, r.rate));
-  try { await playUrls([url], ++playToken); log('   played to the end.'); }
-  catch (e) { log('FAILED at step 3 (playing audio): ' + errText(e)); return; }
-  finally { URL.revokeObjectURL(url); }
-  log(rtf >= 2 ? 'RESULT: works, and this device is fast enough for any speed.'
-    : rtf >= 1.1 ? 'RESULT: works. Fine at normal speed; use 1× to 1.25× to avoid gaps between sentences.'
-    : 'RESULT: works but this device is slower than real time, so expect pauses between sentences. ' + (navigator.gpu && wantMode() !== 'gpu' ? 'Try Settings → Natural voice mode → Fast (graphics chip), or use the device voice.' : 'The device voice will feel smoother here.'));
+  if (play) {
+    try { await playUrls([url], ++playToken); log('  played to the end'); } catch (e) { log('  FAILED to play it: ' + errText(e)); URL.revokeObjectURL(url); return { ok: false }; }
+    URL.revokeObjectURL(url);
+  }
+  return { ok: true, rtf, url: play ? null : url };
 }
-$('btnTest').onclick = () => { stop(); unlockAudio(); testVoice(); };
+async function testDevice(log, play) {
+  log('— This device’s own voice');
+  if (!('speechSynthesis' in window)) { log('  not available in this browser'); return { ok: false }; }
+  const vs = speechSynthesis.getVoices(), v = bestDeviceVoice();
+  log('  ' + vs.length + ' voices found; would use: ' + (v ? v.name + ' (' + v.lang + ')' : 'the browser default'));
+  if (play) { await speakDevice(SAMPLE, ++playToken); log('  spoken'); }
+  return { ok: true };
+}
+async function runTests(all) {
+  const out = $('testOut'); out.style.display = 'block'; out.textContent = '';
+  const log = s => { out.textContent += s + '\n'; out.scrollTop = out.scrollHeight; };
+  log('Browser: ' + (navigator.userAgent.match(/(Chrome|Firefox|Version|Safari)\/[\d.]+/g) || []).slice(0, 2).join(' '));
+  log('Secure page: ' + window.isSecureContext + ' | threads allowed: ' + !!window.crossOriginIsolated + ' | cores: ' + (navigator.hardwareConcurrency || '?') + ' | memory: ' + (navigator.deviceMemory ? navigator.deviceMemory + ' GB' : '?'));
+  log('Background workers: ' + (typeof Worker !== 'undefined') + ' | WebAssembly: ' + (typeof WebAssembly !== 'undefined') + ' | graphics chip (WebGPU): ' + !!navigator.gpu);
+  log('Speed setting: ' + settings.speed + '× | engine setting: ' + settings.engine);
+  const first = pickBackend();
+  const ids = all ? ['kokoro', 'piper'] : (first ? [first.id] : []);
+  const res = {};
+  for (const id of ids) res[id] = await testBackend(backends[id], log, !all && id === ids[0]);
+  if (all || !first) res.device = await testDevice(log, !all);
+  log('');
+  const need = settings.speed;
+  if (all) {
+    const k = res.kokoro, p = res.piper;
+    settings.slow = k && k.ok ? Object.assign({}, settings.slow, { kokoro: k.rtf }) : settings.slow; saveSettings();
+    let rec, why;
+    if (k && k.ok && k.rtf >= Math.max(1.1, need * 1.1)) { rec = 'Natural – best quality (Kokoro)'; why = 'it is fast enough here'; }
+    else if (p && p.ok && p.rtf >= need * 1.1) { rec = 'Natural – fast (Piper)'; why = k && k.ok ? 'Kokoro is too slow at ' + need + '× here (' + k.rtf.toFixed(1) + '×)' : 'Kokoro does not work here'; }
+    else if (k && k.ok) { rec = 'Natural – best quality (Kokoro)'; why = 'it works, but lower the speed to avoid pauses'; }
+    else if (p && p.ok) { rec = 'Natural – fast (Piper)'; why = 'it works; Kokoro does not'; }
+    else { rec = 'This device’s voice'; why = 'neither natural voice works here'; }
+    log('RECOMMENDED: ' + rec + ' (' + why + ').');
+    log('The app switches to a backup by itself if the chosen voice fails or is too slow.');
+    const best = (k && k.ok && rec.includes('Kokoro')) ? k : (p && p.ok ? p : null);
+    ['kokoro', 'piper'].forEach(id => { if (res[id] && res[id].url && res[id] !== best) URL.revokeObjectURL(res[id].url); });
+    if (best && best.url) { log('Playing the recommended voice…'); try { await playUrls([best.url], ++playToken); } catch (e) { log('FAILED to play: ' + errText(e)); } URL.revokeObjectURL(best.url); }
+  } else {
+    const only = res[ids[0]] || res.device;
+    log(only && only.ok ? (only.rtf ? 'RESULT: works — ' + rtfWord(only.rtf) + (only.rtf < need * 0.85 ? '. At ' + need + '× it will pause; the app will switch to a faster backup by itself.' : '.') : 'RESULT: works.') : 'RESULT: this voice does not work here — the app will use the next backup automatically. Try "Test all backups".');
+  }
+  showActive();
+}
+$('btnTest').onclick = () => { stop(); unlockAudio(); runTests(false); };
+$('btnTestAll').onclick = () => { stop(); unlockAudio(); runTests(true); };
 
 /* ---------- controls ---------- */
 $('btnPlay').onclick = toggle;
@@ -696,6 +837,7 @@ window.__reader = {
   get pos() { return { c: cc, u: ci }; }, get nchunks() { return chunks.length; },
   get attached() { return chunks.filter(c => c.attached).length; },
   get cur() { return chunks[cc] && chunks[cc].units && chunks[cc].units[ci] && chunks[cc].units[ci].speak; },
-  get books() { return books; }, get toc() { return toc; }, get tts() { return ttsStats; }, ensureVoice, ttsGenerate: (t, v) => ttsGenerate(t, v || settings.kvoice), get audio() { return { t: player.currentTime, paused: player.paused, dur: player.duration, src: String(player.src).slice(0, 5) }; }, start, stop, skip, openBook
+  get books() { return books; }, get toc() { return toc; }, get tts() { return (curBackend || backends.kokoro).stats; }, get backend() { return curBackend && curBackend.id; }, get failed() { return Object.keys(failed); },
+  backends, genWith: (id, text) => backends[id].ready().then(() => backends[id].gen(text, backends[id].voice())), get audio() { return { t: player.currentTime, paused: player.paused, dur: player.duration, src: String(player.src).slice(0, 5) }; }, start, stop, skip, openBook
 };
 })();

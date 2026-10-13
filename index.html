@@ -66,6 +66,7 @@ footer { display:flex; align-items:center; justify-content:center; gap:10px; pad
 footer button.play { width:64px; height:48px; font-size:22px; background:var(--accent); color:#1a1a1a; border:0; border-radius:24px; }
 footer .skip { width:44px; padding:8px 0; }
 footer select { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:8px; }
+#notice { position:fixed; left:50%; transform:translateX(-50%); bottom:132px; background:var(--panel); border:1px solid var(--accent); border-radius:12px; padding:9px 14px; font-size:13px; line-height:1.4; display:none; max-width:92vw; text-align:center; z-index:6; }
 #status { position:fixed; left:50%; transform:translateX(-50%); bottom:84px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px 14px; font-size:13px; color:var(--dim); display:none; max-width:90vw; text-align:center; z-index:5; }
 dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:16px; padding:0; width:min(32rem,94vw); max-height:88vh; }
 dialog::backdrop { background:rgba(0,0,0,.6); }
@@ -77,6 +78,7 @@ dialog::backdrop { background:rgba(0,0,0,.6); }
 .book .meter { height:4px; background:var(--line); border-radius:2px; margin-top:6px; } .book .meter i { display:block; height:100%; background:var(--accent); border-radius:2px; }
 .book small { color:var(--dim); } .book .x { padding:4px 10px; color:var(--dim); }
 #testOut { display:none; white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px; line-height:1.5; margin:0; }
+select { background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:6px 8px; max-width:62%; }
 textarea, input[type=text] { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px; }
 textarea { min-height:90px; resize:vertical; }
 input[type=range] { width:100%; }
@@ -97,6 +99,7 @@ input[type=range] { width:100%; }
 <div id="bar"><div id="barfill"></div></div>
 <main id="main"><div id="content"></div></main>
 <div id="status"></div>
+<div id="notice"></div>
 <footer>
   <button class="skip" id="btnPrev" aria-label="Previous sentence">&#9198;</button>
   <button class="play" id="btnPlay" aria-label="Play or pause">&#9654;</button>
@@ -124,17 +127,19 @@ input[type=range] { width:100%; }
 
 <dialog id="dlgSet"><div class="dlg">
   <h2>Settings <button id="closeSet">Close</button></h2>
-  <div class="row"><label>Voice engine</label>
-    <select id="engine"><option value="kokoro">Natural (Kokoro, free)</option><option value="device">This device's voice</option></select></div>
+  <div class="row"><label>Voice</label>
+    <select id="engine"><option value="kokoro">Natural – best quality (Kokoro)</option><option value="piper">Natural – fast (Piper)</option><option value="device">This device's voice</option></select></div>
+  <div class="hint" id="activeVoice"></div>
   <div class="row" id="rowKMode"><label>Natural voice mode</label><select id="kmode"><option value="wasm">Standard (90 MB)</option><option value="gpu">Fast – graphics chip (330 MB)</option></select></div>
   <div class="row" id="rowKVoice"><label>Natural voice</label><select id="kvoice"></select></div>
-  <div class="row" id="rowDVoice"><label>Device voice</label><select id="dvoice"></select></div>
+  <div class="row" id="rowDVoice"><label>Device voice (last backup)</label><select id="dvoice"></select></div>
   <div class="row"><label>Text size</label><input type="range" id="fs" min="14" max="30" step="1" style="width:55%"></div>
-  <div class="row"><label>Read code aloud</label><input type="checkbox" id="readCode"></div>
+  <div class="row"><label>Math</label><select id="mathMode"><option value="read">Read it aloud</option><option value="say">Just say "equation"</option><option value="skip">Skip it</option></select></div>
+  <div class="row"><label>Code</label><select id="codeMode"><option value="read">Read it aloud</option><option value="say">Just say "code block"</option><option value="skip">Skip it</option></select></div>
   <div class="row"><label>Wrap long code lines</label><input type="checkbox" id="wrap"></div>
-  <div class="row"><label>Check the natural voice</label><button id="btnTest">Test voice</button></div>
+  <div class="row"><label>Check the voice</label><span><button id="btnTest">Test voice</button> <button id="btnTestAll">Test all backups</button></span></div>
   <pre id="testOut"></pre>
-  <div class="hint">Natural voice downloads a ~90&nbsp;MB model once (first time you press play), then works offline. Tap any sentence to jump there.</div>
+  <div class="hint">Natural voices download once (Kokoro ≈ 90 MB, Piper ≈ 65 MB) from this site, are then kept on your device, and work offline. If the chosen voice fails or is too slow, the app moves to the next backup by itself: Kokoro → Kokoro on the page → Piper → your device’s voice. Tap any sentence to jump there.</div>
 </div></dialog>
 
 <script src="vendor/marked.min.js"></script>

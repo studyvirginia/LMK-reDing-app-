@@ -1,5 +1,6 @@
 /* Natural voice (Kokoro) running in a background thread, so generating speech never freezes the page. */
 import { KokoroTTS, env } from './vendor/kokoro/kokoro.web.js';
+import { installModelRedirect } from './modelhost.js';
 
 let tts = null;
 let chain = Promise.resolve(); // the model can only run one request at a time
@@ -10,6 +11,7 @@ self.onmessage = e => {
     (async () => {
       try {
         env.wasmPaths = m.wasmPaths; // runtime files are hosted with the app
+        installModelRedirect(m.base, (file, from) => { if (/\.onnx$/.test(file)) self.postMessage({ type: 'source', from }); }); // model files too
         tts = await KokoroTTS.from_pretrained(m.model, {
           dtype: m.dtype || 'q8', device: m.device || 'wasm',
           progress_callback: p => { if (p && p.status === 'progress') self.postMessage({ type: 'progress', file: p.file, progress: p.progress }); }

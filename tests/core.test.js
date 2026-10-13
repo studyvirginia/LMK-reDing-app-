@@ -7,7 +7,7 @@ const snap = require('./math.snap.json');
 for (const k of Object.keys(snap)) eq('math: ' + k, sp(k), snap[k]);
 // a few readings spelled out
 eq('f(x) is "f of x"', sp('f(x) = x^2'), 'f of x equals x squared');
-eq('conditional probability', sp('P(A \\mid B)'), 'P of A given B');
+eq('conditional probability', sp('P(A \\mid B)'), 'P of \u24d0 given B');
 eq('set builder', sp('\\{ x : x > 0 \\}'), 'the set of x such that x is greater than 0');
 eq('multiplied group', sp('2(x+1)'), '2 times the quantity x plus 1');
 eq('half', sp('\\frac{1}{2} m v^2'), 'one half m v squared');
@@ -28,9 +28,9 @@ eq('math count', M.maths.map(m => [m.tex, m.display]), [['x^2', false], ['a=b', 
 
 // full build with stubs
 const doc = C.buildDocument('# Title\n\nFirst sentence with $x^2$. Second one.\n\n$$\\frac{a}{b}$$\n\n- item one\n- item two\n\n```\ncode here\n```\n', {
-  renderMath: (t, d) => '[' + t + ']', parseInline: s => s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>'), parseBlock: s => '<pre>' + s + '</pre>' });
+  renderMath: (t, d) => '[' + t + ']', parseInline: s => s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>'), parseBlock: s => '<pre>' + s + '</pre>', codeMode: 'skip' });
 console.log(doc.html);
-eq('units', doc.units.map(u => u.speak), ['Title.', 'First sentence with x squared.', 'Second one.', 'Equation. ay over b.', 'item one', 'item two']);
+eq('units', doc.units.map(u => u.speak), ['Title.', 'First sentence with x squared.', 'Second one.', 'Equation. \u24d0 over b.', 'item one', 'item two']);
 
 const md = C.texToMd('\\documentclass{article}\n\\begin{document}\n\\section{Intro}\nSome \\textbf{bold} text % comment\n\\begin{itemize}\\item A\\item B\\end{itemize}\n\\begin{equation}E=mc^2\\end{equation}\n\\end{document}');
 console.log(md);
@@ -63,7 +63,7 @@ const strip = s => s.replace(/\*\*/g, '').replace(/(^|[^*])\*([^*]+)\*/g, '$1$2'
 const texUnits = C.buildDocument(texMd, { renderMath: () => '', parseInline: strip, parseBlock: x => x, readCode: true }).units.map(u => u.speak).join('\n');
 eq('tex: macros expanded (\\norm, \\inner, \\argmax, \\eps)', /the 2 norm of x/.test(texUnits) && /the inner product of x and y/.test(texUnits) && /the argmax over y of/.test(texUnits) && /epsilon/.test(texUnits), true);
 eq('tex: \\R is the real numbers, R^n is "R n"', /f colon R n to the real numbers/.test(texUnits), true);
-eq('tex: big O and trace read as functions', /O of the norm of h squared/.test(texUnits) && /Tr of A transpose A/.test(texUnits), true);
+eq('tex: big O and trace read as functions', /O of the norm of h squared/.test(texUnits) && /Tr of \u24d0 transpose \u24d0/.test(texUnits), true);
 eq('tex: aligned rows stay separate sentences', /equals f of x plus the inner product of nabla f of x and h plus O of the norm of h squared\. Tr of/.test(texUnits), true);
 eq('tex: figure reduced to its caption, footnote and url as text', /Figure\. Loss versus iteration for three step sizes/.test(texUnits) && /\(See \[citation\] for details/.test(texUnits) && /https:\/\/example\.com/.test(texUnits), true);
 eq('tex: verbatim code survives (% is not a comment)', /print\(i % 3\)/.test(texMd), true);
@@ -71,4 +71,19 @@ eq('tex: nothing of LaTeX leaks into speech', /\\(begin|end|includegraphics|capt
 eq('frac13 shorthand', sp('\\frac13 + x^23'), 'one third plus x squared 3');
 const IT = C.texToMd('\\begin{enumerate}\\item[(a)] First \\item Second\\end{enumerate}');
 eq('item labels kept', /1\. \(a\)\s+First/.test(IT), true);
+
+// the letter a: speech engines read "a" as the article "uh" and "ay" as "eye"; we spell it "eigh" for natural voices
+eq('letter a is marked, then spelled per engine', [C.forEngine(sp('x + a'), 'espeak'), C.forEngine(sp('A^T A'), 'device')], ['x plus eigh', 'ay transpose ay']);
+eq('other letters untouched', C.forEngine(sp('b + c'), 'espeak'), 'b plus c');
+
+// math and code settings: read | say | skip
+const MD = 'Let $f(x)=x^2$ be a function and call `foo()` here.\n\n$$\\int_0^1 x\\,dx=\\frac12$$\n\n```python\nprint(1+2)\n```\n\nDone.';
+const modeEnv = (m, k) => ({ renderMath: () => '', parseInline: s => s.replace(/`([^`]+)`/g, '<code>$1</code>'), parseBlock: x => x, mathMode: m, codeMode: k });
+const U = (m, k) => C.buildDocument(MD, modeEnv(m, k)).units.map(u => u.speak);
+eq('modes: read everything', U('read', 'read'), ['Let f of x equals x squared be a function and call foo open paren close paren here.', 'Equation. the integral from 0 to 1 of x d x equals one half.', 'Code block in Python.', 'print open paren 1 plus 2 close paren', 'Done.']);
+eq('modes: say equation / code block only', U('say', 'say'), ['Let equation be a function and call code here.', 'Equation.', 'Code block in Python.', 'Done.']);
+eq('modes: skip both', U('skip', 'skip'), ['Let be a function and call here.', 'Done.']);
+eq('modes: math read, code skipped', U('read', 'skip').length, 3);
+eq('modes: skipped code is still shown', /<pre class="code">/.test(C.buildDocument(MD, modeEnv('read', 'skip')).html), true);
+eq('modes: skipped equations are still shown', /class="mathblock"/.test(C.buildDocument(MD, modeEnv('skip', 'read')).html) && !/class="s mathblock"/.test(C.buildDocument(MD, modeEnv('skip', 'read')).html), true);
 console.log(fail ? fail + ' FAILED' : 'ALL PASS'); process.exit(fail ? 1 : 0);

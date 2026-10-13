@@ -308,7 +308,11 @@ function isAtomic(it) {
 function isSimpleItems(items) { const xs = items.filter(Boolean); return xs.length <= 2 && xs.every(isAtomic) && !(xs.length === 2 && xs[0].t === 'num' && xs[1].t === 'num'); }
 function argItems(a) { return a && a.t === 'group' ? a.items : a ? [a] : []; }
 function hasOperator(items) { return items.some(x => isOpItem(x) || isRelItem(x) || x.t === 'frac' || (x.t === 'group' && hasOperator(x.items)) || (x.t === 'delim' && hasOperator(x.items))); }
-const letterWord = v => (v === 'a' ? 'ay' : v);
+// The letter a is the one letter speech engines get wrong: "a" is read as the weak article "uh", and "ay" as "eye".
+// We mark it here and spell it per engine (see forEngine): "eigh" gives the letter name for the espeak-based natural voices.
+const LETTER_A = '\u24d0';
+const letterWord = v => (v === 'a' || v === 'A' ? LETTER_A : v);
+function forEngine(text, kind) { return text.indexOf(LETTER_A) < 0 ? text : text.replace(/\u24d0/g, kind === 'espeak' ? 'eigh' : 'ay'); }
 const wordOf = items => { const xs = items.filter(Boolean); return xs.length > 1 && xs.every(x => x.t === 'sym') ? xs.map(x => x.v).join('') : null; };
 
 function speakMath(items, ctx) {
@@ -880,19 +884,21 @@ function scanHeadings(text) {
 
 function buildDocument(raw, env) {
   const { renderMath, parseInline, parseBlock } = env;
+  const mathMode = env.mathMode || 'read', codeMode = env.codeMode || (env.readCode === false ? 'skip' : 'read'); // read | say | skip
   const text0 = raw.replace(/\r\n?/g, '\n').replace(/\t/g, '    ');
   const { text, maths } = extractMath(text0);
   const blocks = parseBlocks(text, i => maths[i] && maths[i].display);
   const units = [], headings = [];
   const TOK = /⟦(\d+)⟧/g;
   const speechCache = {};
-  const mathSpeech = i => speechCache[i] != null ? speechCache[i] : (speechCache[i] = texToSpeech(maths[i].tex));
+  const mathSpeech = i => mathMode === 'skip' ? '' : mathMode === 'say' ? 'equation' : (speechCache[i] != null ? speechCache[i] : (speechCache[i] = texToSpeech(maths[i].tex)));
   // lazyMath: leave a placeholder and let the page draw it when scrolled near (huge books create millions of nodes otherwise)
   const mathHtml = i => env.lazyMath ? '<span class="mj" data-m="' + i + '"></span>' : renderMath(maths[i].tex, maths[i].display);
 
   function inline(md) {
     const h = parseInline(md);
-    const spoken = env.readCode ? h.replace(/<code>([\s\S]*?)<\/code>/g, (m, x) => ' ' + (codeToSpeech(htmlToText(x)) || htmlToText(x)) + ' ') : h;
+    const spoken = codeMode === 'read' ? h.replace(/<code>([\s\S]*?)<\/code>/g, (m, x) => ' ' + (codeToSpeech(htmlToText(x)) || htmlToText(x)) + ' ')
+      : codeMode === 'say' ? h.replace(/<code>[\s\S]*?<\/code>/g, ' code ') : h.replace(/<code>[\s\S]*?<\/code>/g, ' ');
     const speak = clean(htmlToText(spoken).replace(TOK, (m, i) => ' ' + mathSpeech(+i) + ' '));
     const html = h.replace(TOK, (m, i) => '<span class="m">' + mathHtml(+i) + '</span>');
     return { html, speak };
@@ -920,18 +926,23 @@ function buildDocument(raw, env) {
       if (openList !== tag) { closeList(); html += '<' + tag + '>'; openList = tag; }
       html += '<li class="d' + b.depth + '">' + unit(b.md) + '</li>';
     } else if (b.t === 'math') {
-      units.push({ speak: 'Equation. ' + mathSpeech(b.idx) + '.' });
-      html += '<div class="s mathblock" data-i="' + (units.length - 1) + '">' + mathHtml(b.idx) + '</div>';
-    } else if (b.t === 'code' && env.readCode) {
+      if (mathMode === 'skip') html += '<div class="mathblock">' + mathHtml(b.idx) + '</div>';
+      else {
+        units.push({ speak: mathMode === 'say' ? 'Equation.' : 'Equation. ' + mathSpeech(b.idx) + '.' });
+        html += '<div class="s mathblock" data-i="' + (units.length - 1) + '">' + mathHtml(b.idx) + '</div>';
+      }
+    } else if (b.t === 'code' && codeMode !== 'skip') {
       const name = LANGS[b.lang] || (b.lang && /^[a-z0-9+#.-]+$/.test(b.lang) ? b.lang : '');
       units.push({ speak: 'Code block' + (name ? ' in ' + name : '') + '.' });
       let inner = '<div class="codehead s" data-i="' + (units.length - 1) + '">' + esc(name ? name + ' code' : 'code') + '</div><pre class="code"><code>';
       for (const line of b.body) {
-        const sp = codeToSpeech(line);
+        const sp = codeMode === 'read' ? codeToSpeech(line) : '';
         if (sp && /[A-Za-z0-9]/.test(sp)) { units.push({ speak: sp }); inner += '<span class="s codeline" data-i="' + (units.length - 1) + '">' + esc(line) + '</span>'; }
         else inner += '<span class="codeline">' + (esc(line) || ' ') + '</span>';
       }
       html += '<div class="codeblock">' + inner + '</code></pre></div>';
+    } else if (b.t === 'code') {
+      html += '<div class="codeblock"><pre class="code"><code>' + b.body.map(l => '<span class="codeline">' + (esc(l) || ' ') + '</span>').join('') + '</code></pre></div>';
     } else html += '<div class="rawblock">' + parseBlock(b.md || '') + '</div>';
   }
   closeList();
@@ -981,6 +992,6 @@ function chunkForTTS(t, max) {
   return fin;
 }
 
-const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, splitChunks, scanHeadings, plainTitle, codeToSpeech, esc };
+const api = { texToSpeech, texToMd, extractMath, splitSentences, parseBlocks, buildDocument, chunkForTTS, splitChunks, scanHeadings, plainTitle, codeToSpeech, forEngine, esc };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.BookCore = api;
 })(typeof self !== 'undefined' ? self : this);
