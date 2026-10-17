@@ -7,7 +7,7 @@ const $ = id => document.getElementById(id);
 const Core = window.BookCore;
 
 /* ---------- settings (localStorage, per-device conveniences) ---------- */
-const DEFAULTS = { engine: 'kokoro', kmode: 'wasm', kvoice: 'af_heart', dvoice: '', speed: 1, fs: 19, wrap: false, mathMode: 'read', codeMode: 'read', cps: { kokoro: 14, piper: 14, device: 14 }, cur: '' };
+const DEFAULTS = { engine: 'kokoro', kmode: 'wasm', kvoice: 'af_heart', dvoice: '', speed: 1, fs: 19, wrap: false, tocLevels: 9, mathMode: 'read', codeMode: 'read', cps: { kokoro: 14, piper: 14, device: 14 }, cur: '' };
 let settings = Object.assign({}, DEFAULTS);
 try { const saved = JSON.parse(localStorage.getItem('br.settings') || '{}'); Object.assign(settings, saved); if (saved.readCode === false && !saved.codeMode) settings.codeMode = 'skip'; delete settings.readCode; } catch (e) {}
 const saveSettings = () => { try { localStorage.setItem('br.settings', JSON.stringify(settings)); } catch (e) {} };
@@ -675,12 +675,19 @@ function currentTocIndex() {
   }
   return cur;
 }
+// Contents shows EVERY heading (no cap). Browsers skip drawing the off-screen ones (content-visibility), so even
+// a book with thousands of headings opens instantly. Higher-level headings are bigger and have space above them.
+const TOC_LEVELS = [[1, 'Chapters'], [2, 'Sections'], [9, 'All']];
 function renderToc() {
   const list = $('tocList'), q = $('tocFilter').value.trim().toLowerCase();
   list.textContent = '';
-  if (!toc.length) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = book ? 'No headings found in this book.' : 'Open a book first.'; list.appendChild(d); return; }
+  const count = $('tocCount');
+  if (!toc.length) { count.textContent = ''; const d = document.createElement('div'); d.className = 'hint'; d.textContent = book ? 'No headings found in this book.' : 'Open a book first.'; list.appendChild(d); return null; }
   const minLevel = Math.min.apply(null, toc.map(e => e.level));
+  const maxDepth = settings.tocLevels || 9;
+  const visible = (e) => q ? e.title.toLowerCase().indexOf(q) >= 0 : (e.level - minLevel) < maxDepth;
   const cur = currentTocIndex();
+  let curVis = -1; for (let k = 0; k <= cur; k++) if (visible(toc[k])) curVis = k; // nearest shown heading at or before you
   // length of each entry = until the next heading at the same or a higher level (so a chapter includes its sections)
   const dur = new Array(toc.length), nextAt = {};
   for (let k = toc.length - 1; k >= 0; k--) {
@@ -688,24 +695,35 @@ function renderToc() {
     for (let lv = 1; lv <= e.level; lv++) if (nextAt[lv] != null && nextAt[lv] < end) end = nextAt[lv];
     dur[k] = secsForSrc(end - tocStart(e)); nextAt[e.level] = tocStart(e);
   }
+  const frag = document.createDocumentFragment();
   let shown = 0, curBtn = null;
   for (let k = 0; k < toc.length; k++) {
     const e = toc[k];
-    if (q && e.title.toLowerCase().indexOf(q) < 0) continue;
-    if (!q && shown >= 800 && k !== cur) continue; // very long contents: show the first 800, search for the rest
-    const b = document.createElement('button'); b.className = 'toc' + (k === cur ? ' cur' : '');
-    b.style.paddingLeft = (6 + (e.level - minLevel) * 16) + 'px';
+    if (!visible(e)) continue;
+    const depth = e.level - minLevel;
+    const b = document.createElement('button'); b.className = 'toc l' + Math.min(3, depth) + (k === curVis ? ' cur' : '');
+    b.style.paddingLeft = (8 + Math.min(depth, 5) * 14) + 'px';
     b.appendChild(document.createTextNode(e.title + ' '));
     const sm = document.createElement('small'); sm.textContent = '· ' + fmtDur(dur[k]); b.appendChild(sm);
     b.onclick = () => { $('dlgToc').close(); jumpTo(e.c, tocUnit(e)); };
-    list.appendChild(b); shown++; if (k === cur) curBtn = b;
+    frag.appendChild(b); shown++; if (k === curVis) curBtn = b;
   }
-  if (!q && toc.length > 800) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = 'Showing the first 800 of ' + toc.length + ' headings. Type above to search all of them.'; list.appendChild(d); }
-  if (curBtn) curBtn.scrollIntoView({ block: 'center' });
+  list.appendChild(frag);
+  count.textContent = shown === toc.length ? toc.length.toLocaleString() + ' headings' : shown.toLocaleString() + ' of ' + toc.length.toLocaleString() + ' headings' + (q ? ' match' : ' shown');
+  document.querySelectorAll('#tocLevels button').forEach(bt => bt.classList.toggle('on', +bt.dataset.l === (settings.tocLevels || 9)));
+  if (!shown) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = 'No headings match.'; list.appendChild(d); }
+  return curBtn;
 }
-$('btnToc').onclick = () => { $('tocFilter').value = ''; renderToc(); $('dlgToc').showModal(); };
+function centerToc(btn) { // call after the dialog is open (a closed dialog has no layout to scroll)
+  if (!btn) return;
+  const go = () => btn.scrollIntoView({ block: 'center' });
+  go(); requestAnimationFrame(go); setTimeout(go, 120); // sizes of off-screen entries settle as they are drawn
+}
+$('btnToc').onclick = () => { $('tocFilter').value = ''; const b = renderToc(); $('dlgToc').showModal(); centerToc(b); };
 $('closeToc').onclick = () => $('dlgToc').close();
-$('tocFilter').oninput = renderToc;
+$('tocFilter').oninput = () => { renderToc(); };
+$('tocLevels').innerHTML = TOC_LEVELS.map(l => '<button data-l="' + l[0] + '">' + l[1] + '</button>').join('');
+$('tocLevels').onclick = e => { const bt = e.target.closest('button'); if (!bt) return; settings.tocLevels = +bt.dataset.l; saveSettings(); $('tocFilter').value = ''; centerToc(renderToc()); };
 
 /* ---------- settings UI ---------- */
 function syncSettingsUI() {

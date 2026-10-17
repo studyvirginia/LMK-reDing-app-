@@ -35,8 +35,15 @@ header .sub { display:flex; align-items:baseline; gap:10px; margin-top:6px; }
 header .title { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; font-size:14px; }
 header .times { color:var(--dim); font-size:12px; margin-top:2px; }
 header .prog { color:var(--dim); font-size:13px; white-space:nowrap; }
-.toc { display:block; width:100%; text-align:left; background:none; border:0; border-bottom:1px solid var(--line); border-radius:0; padding:10px 6px; }
-.toc.cur { color:var(--accent); font-weight:600; }
+.toc { display:block; width:100%; text-align:left; background:none; border:0; border-bottom:1px solid var(--line); border-radius:0; padding:10px 6px; line-height:1.35; content-visibility:auto; contain-intrinsic-size:auto 46px; }
+.toc.l0 { font-size:1.12em; font-weight:700; margin-top:16px; border-bottom:2px solid var(--line); padding-top:12px; padding-bottom:12px; }
+.toc.l1 { font-size:1.02em; font-weight:600; margin-top:6px; }
+.toc.l2 { font-size:.95em; }
+.toc.l3 { font-size:.88em; color:var(--dim); }
+.toc:first-child { margin-top:0; }
+.toc.cur { color:var(--accent); font-weight:700; background:rgba(231,195,90,.10); }
+#tocLevels { display:flex; gap:6px; } #tocLevels button { flex:1; padding:6px 4px; font-size:13px; } #tocLevels button.on { border-color:var(--accent); color:var(--accent); }
+#tocList { overflow-y:auto; max-height:56vh; -webkit-overflow-scrolling:touch; }
 .toc small { color:var(--dim); font-weight:400; }
 #bar { height:3px; background:var(--line); } #barfill { height:100%; width:0; background:var(--accent); transition:width .3s; }
 main { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; scroll-behavior:smooth; }
@@ -122,6 +129,8 @@ input[type=range] { width:100%; }
 <dialog id="dlgToc"><div class="dlg">
   <h2>Contents <button id="closeToc">Close</button></h2>
   <input type="text" id="tocFilter" placeholder="Search headings…" autocomplete="off">
+  <div id="tocLevels"></div>
+  <div class="hint" id="tocCount"></div>
   <div id="tocList"></div>
 </div></dialog>
 
