@@ -3,6 +3,7 @@
    so a 900-page book costs about the same as a 30-page one. */
 (function () {
 'use strict';
+const BUILD = '2026-10-17.2'; // bumped on every release; shown in Settings so you can tell which version you are running
 const $ = id => document.getElementById(id);
 const Core = window.BookCore;
 
@@ -839,6 +840,27 @@ document.addEventListener('keydown', e => {
   else if (e.code === 'ArrowRight') skip(1);
   else if (e.code === 'ArrowLeft') skip(-1);
 });
+
+/* ---------- keeping the app up to date ---------- */
+const pageBuild = (document.querySelector('meta[name=build]') || {}).content;
+$('buildInfo').textContent = 'App version ' + BUILD + (pageBuild && pageBuild !== BUILD ? ' (page is ' + pageBuild + ')' : '');
+async function updateApp(auto) {
+  // re-download the app's own files past any cached copy, drop the helper service worker so it reinstalls, then reload.
+  // Books, progress, settings and downloaded voices are NOT touched.
+  try {
+    const files = ['./', 'index.html', 'core.js', 'pdfimport.js', 'app.js', 'modelhost.js', 'tts-worker.js', 'piper-worker.js', 'coi-sw.js'];
+    await Promise.all(files.map(f => fetch(f + (f === './' ? '' : '?refresh=' + Date.now()), { cache: 'reload' }).catch(() => {})));
+    await Promise.all(files.slice(1).map(f => fetch(f, { cache: 'reload' }).catch(() => {})));
+    if (navigator.serviceWorker) { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r => r.unregister())); }
+  } catch (e) {}
+  try { sessionStorage.removeItem('coiReloaded'); } catch (e) {}
+  location.reload();
+}
+$('btnRefresh').onclick = () => { status('Updating…'); updateApp(false); };
+if (pageBuild && pageBuild !== BUILD) { // index.html and app.js come from different releases: the browser mixed old and new files
+  let tried = false; try { tried = sessionStorage.getItem('updTried') === '1'; sessionStorage.setItem('updTried', '1'); } catch (e) {}
+  if (!tried) updateApp(true); else notify('Part of the app is out of date. Open Settings and tap "Update app now".');
+} else { try { sessionStorage.removeItem('updTried'); } catch (e) {} }
 
 /* ---------- boot ---------- */
 const welcome = () => '<div class="empty"><h2>Book Reader</h2>Open <b>Library</b> to add a Markdown or LaTeX file.<br>Press play to hear it read aloud; tap any sentence to jump there.<br>Your place is saved automatically.</div>';

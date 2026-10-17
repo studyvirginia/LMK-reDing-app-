@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="build" content="2026-10-17.2">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Book Reader</title>
 <script>
@@ -146,6 +147,7 @@ input[type=range] { width:100%; }
   <div class="row"><label>Math</label><select id="mathMode"><option value="read">Read it aloud</option><option value="say">Just say "equation"</option><option value="skip">Skip it</option></select></div>
   <div class="row"><label>Code</label><select id="codeMode"><option value="read">Read it aloud</option><option value="say">Just say "code block"</option><option value="skip">Skip it</option></select></div>
   <div class="row"><label>Wrap long code lines</label><input type="checkbox" id="wrap"></div>
+  <div class="row"><label id="buildInfo">App version</label><button id="btnRefresh">Update app now</button></div>
   <div class="row"><label>Check the voice</label><span><button id="btnTest">Test voice</button> <button id="btnTestAll">Test all backups</button></span></div>
   <pre id="testOut"></pre>
   <div class="hint">Natural voices download once (Kokoro ≈ 90 MB, Piper ≈ 65 MB) from this site, are then kept on your device, and work offline. If the chosen voice fails or is too slow, the app moves to the next backup by itself: Kokoro → Kokoro on the page → Piper → your device’s voice. Tap any sentence to jump there.</div>
@@ -153,8 +155,8 @@ input[type=range] { width:100%; }
 
 <script src="vendor/marked.min.js"></script>
 <script src="vendor/katex/katex.min.js"></script>
-<script src="core.js"></script>
-<script src="pdfimport.js"></script>
-<script src="app.js"></script>
+<script src="core.js?v=2026-10-17.2"></script>
+<script src="pdfimport.js?v=2026-10-17.2"></script>
+<script src="app.js?v=2026-10-17.2"></script>
 </body>
 </html>
